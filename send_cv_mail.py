@@ -85,11 +85,11 @@ def main():
     receiver = sys.argv[1]
 
     # Create message.
-    msg = EmailMessage()
-    msg["Subject"] = config["subject"]
-    msg["From"] = sender
-    msg["To"] = receiver
-    msg.set_content(config["message"])
+    email = EmailMessage()
+    email["Subject"] = config["subject"]
+    email["From"] = sender
+    email["To"] = receiver
+    email.set_content(config["message"])
 
     pdf_path = Path("~/Documents/CV/TR/OzanMalciBilMuhCV.pdf").expanduser()
 
@@ -107,7 +107,7 @@ def main():
     except (OSError, PermissionError) as exc:
         msg = f"Failed to read PDF file: {exc}"
         logger.exception(msg)
-        raise OSError(msg) from exc
+        raise
 
     # Determine MIME type.
     content_type = (
@@ -117,7 +117,7 @@ def main():
     logger.debug("Determined MIME type: %s/%s", maintype, subtype)
 
     # Add attachment.
-    msg.add_attachment(
+    email.add_attachment(
         pdf_data, maintype=maintype, subtype=subtype, filename=pdf_name
     )
 
@@ -129,7 +129,7 @@ def main():
             smtp.login(sender, password)
             logger.debug("Successfully logged in to SMTP server")
 
-            smtp.send_message(msg)
+            smtp.send_message(email)
             logger.debug("Message sent to SMTP server")
     except smtplib.SMTPResponseException as resp_exc:
         logger.exception(
@@ -141,7 +141,7 @@ def main():
     except smtplib.SMTPException as smtp_exc:
         msg = f"Failed to send email: {smtp_exc}"
         logger.exception("Failed to send email")
-        raise smtplib.SMTPException(msg) from smtp_exc
+        raise
     else:
         logger.info("Email sent to %s with attachment %s", receiver, pdf_name)
 
