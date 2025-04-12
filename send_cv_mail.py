@@ -138,9 +138,8 @@ def main():
             resp_exc.smtp_error,
         )
         raise
-    except smtplib.SMTPException as smtp_exc:
-        msg = f"Failed to send email: {smtp_exc}"
-        logger.exception("Failed to send email")
+    except smtplib.SMTPException:
+        logger.exception("Failed to send email due to SMTP error")
         raise
     else:
         logger.info("Email sent to %s with attachment %s", receiver, pdf_name)
