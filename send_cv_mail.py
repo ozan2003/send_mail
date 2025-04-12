@@ -24,11 +24,9 @@ def main():
     args = parser.parse_args()
 
     # Configure logging.
-    logging.basicConfig(
-        level=args.loglevel.upper(),
-        format="%(asctime)s - %(levelname)s - %(message)s",
-    )
+    logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
     logger = logging.getLogger(__name__)
+    logger.setLevel(args.loglevel.upper())
     logger.debug("Logging now set up to %s", getLevelName(logger.level))
 
     # Check if sender and password are set.
