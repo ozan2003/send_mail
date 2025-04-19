@@ -91,7 +91,11 @@ def main():
         logger.exception("Failed to send email due to SMTP error")
         raise
     else:
-        logger.info("Email sent to %s with attachment %s", receivers, file_name)
+        logger.info(
+            "Email sent to %s with attachment %s",
+            receivers,
+            file_name,
+        )
 
 
 def setup_argparse() -> argparse.ArgumentParser:
