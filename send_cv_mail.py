@@ -47,7 +47,7 @@ def main():
     # Read configuration file.
     config = parse_toml(config_path, logger)
 
-    receiver = args.receiver_email
+    receivers: list[str] = args.receiver_emails
 
     # Create message.
     email = EmailMessage()
@@ -56,20 +56,20 @@ def main():
     email["Subject"] = config["subject"]
     email.set_content(config["message"])
 
-    # Load PDF file.
-    pdf_path = Path("~/Documents/CV/TR/OzanMalciBilMuhCV.pdf").expanduser()
-    pdf_data, pdf_name = load_pdf_file(pdf_path, logger)
+    # Load file.
+    file_path = Path("~/Documents/CV/TR/OzanMalciBilMuhCV.pdf").expanduser()
+    file_data, file_name = load_file(file_path, logger)
 
     # Determine MIME type.
     content_type = (
-        mimetypes.guess_type(str(pdf_path))[0] or "application/octet-stream"
+        mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
     )
     maintype, subtype = content_type.split("/", 1)
     logger.debug("Determined MIME type: %s/%s", maintype, subtype)
 
     # Add attachment.
     email.add_attachment(
-        pdf_data, maintype=maintype, subtype=subtype, filename=pdf_name
+        file_data, maintype=maintype, subtype=subtype, filename=file_name
     )
 
     # Send email.
@@ -103,7 +103,7 @@ def setup_argparse() -> argparse.ArgumentParser:
 
     """
     parser = argparse.ArgumentParser(
-        description="Email sender script that sends an email with a PDF attachment.",
+        description="Email sender script that sends an email with a attachment.",
         epilog=textwrap.dedent("""
                 Environment variables required:
                     SAU_MAIL: The sender's email address
@@ -128,39 +128,39 @@ def setup_argparse() -> argparse.ArgumentParser:
     return parser
 
 
-def load_pdf_file(pdf_path: Path, logger: logging.Logger) -> tuple[bytes, str]:
+def load_file(file_path: Path, logger: logging.Logger) -> tuple[bytes, str]:
     """
-    Load a PDF file and return its content and name.
+    Load a file and return its content and name.
 
     Args:
-        pdf_path (Path): Path to the PDF file.
+        file_path (Path): Path to the file.
         logger (logging.Logger): Logger instance for logging.
 
     Returns:
-        tuple[bytes, str]: Tuple containing the PDF content and its name.
+        tuple[bytes, str]: Tuple containing the content and its name.
 
     Raises:
-        FileNotFoundError: If the PDF file does not exist.
+        FileNotFoundError: If the file does not exist.
         OSError: If the file cannot be read.
 
     """
-    if not pdf_path.exists():
-        msg = f"PDF file not found at {pdf_path}"
+    if not file_path.exists():
+        msg = f"file not found at {file_path}"
         logger.error(msg)
         raise FileNotFoundError(msg)
 
-    # Read PDF file.
+    # Read file.
     try:
-        with pdf_path.open("rb") as pdf:
-            pdf_data = pdf.read()
-            pdf_name = pdf_path.name
-            logger.debug("Successfully read PDF file: %s", pdf_name)
+        with file_path.open("rb") as fp:
+            file_data = fp.read()
+            file_name = file_path.name
+            logger.debug("Successfully read file: %s", file_name)
     except (OSError, PermissionError) as exc:
-        msg = f"Failed to read PDF file: {exc}"
+        msg = f"Failed to read file: {exc}"
         logger.exception(msg)
         raise
 
-    return pdf_data, pdf_name
+    return file_data, file_name
 
 
 def parse_toml(toml_path: Path, logger: logging.Logger) -> dict[str, Any]:
