@@ -52,7 +52,7 @@ def main():
     # Create message.
     email = EmailMessage()
     email["From"] = sender
-    email["To"] = receiver
+    email["To"] = ",".join(receivers)
     email["Subject"] = config["subject"]
     email.set_content(config["message"])
 
@@ -91,7 +91,7 @@ def main():
         logger.exception("Failed to send email due to SMTP error")
         raise
     else:
-        logger.info("Email sent to %s with attachment %s", receiver, pdf_name)
+        logger.info("Email sent to %s with attachment %s", receivers, file_name)
 
 
 def setup_argparse() -> argparse.ArgumentParser:
@@ -113,9 +113,10 @@ def setup_argparse() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
-        "receiver_email",
+        "receiver_emails",
         type=str,
-        help="Email address of the recipient",
+        nargs="+",
+        help="Email address of the recipient(s)",
     )
 
     parser.add_argument(
