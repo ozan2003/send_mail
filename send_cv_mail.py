@@ -6,6 +6,7 @@ import os
 import smtplib
 import textwrap
 from email.message import EmailMessage
+from email.utils import make_msgid
 from logging import getLevelName
 from pathlib import Path
 from typing import Any
@@ -52,9 +53,24 @@ def main():
     # Create message.
     email = EmailMessage()
     email["From"] = sender
-    email["To"] = ",".join(receivers)
+    email["To"] = sender # Some mail filters reject blank To's.
+    # Don't let them see each other.
+    email["Bcc"] = ",".join(receivers)
     email["Subject"] = config["subject"]
     email.set_content(config["message"])
+
+    email["Reply-To"] = sender  # Add Reply-To header.
+    # This will automatically set the current date.
+    email["Date"] = email["Date"]
+    email["Message-ID"] = make_msgid(domain=sender.split("@")[1])
+
+    # Set plain text content.
+    email.set_content(config["message"])
+
+    # Debug log the email headers.
+    logger.debug("Email headers:")
+    for header, value in email.items():
+        logger.debug("%s: %s", header, value)
 
     # Load file.
     file_path = Path("~/Documents/CV/TR/OzanMalciBilMuhCV.pdf").expanduser()
