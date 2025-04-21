@@ -57,8 +57,6 @@ def main():
     # Don't let them see each other.
     email["Bcc"] = ",".join(receivers)
     email["Subject"] = config["subject"]
-    email.set_content(config["message"])
-
     email["Reply-To"] = sender  # Add Reply-To header.
     # This will automatically set the current date.
     email["Date"] = email["Date"]
@@ -105,6 +103,9 @@ def main():
         raise
     except smtplib.SMTPException:
         logger.exception("Failed to send email due to SMTP error")
+        raise
+    except TimeoutError:
+        logger.exception("Connection timed out while sending email")
         raise
     else:
         logger.info(
@@ -220,7 +221,7 @@ def send_email(
     This function establishes a secure connection with Gmail's SMTP server,
     logs in using the provided credentials, and sends the pre-constructed email message.
 
-    The reviever's email address is set in the EmailMessage object.
+    The reciever's email address is set in the EmailMessage object.
 
     Args:
         sender (str): The sender's email address
@@ -234,9 +235,11 @@ def send_email(
     Raises:
         smtplib.SMTPAuthenticationError: If authentication fails
         smtplib.SMTPException: If any SMTP-related error occurs during sending
+        TimeoutError: If the connection or operations time out
 
     """
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+    # Timeout is 30 seconds.
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30.0) as smtp:
         logger.debug("Established connection to SMTP server")
 
         smtp.login(sender, password)
