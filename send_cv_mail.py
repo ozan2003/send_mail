@@ -6,7 +6,7 @@ import os
 import smtplib
 import textwrap
 from email.message import EmailMessage
-from email.utils import make_msgid
+from email.utils import make_msgid, localtime
 from logging import getLevelName
 from pathlib import Path
 from typing import Any
@@ -58,8 +58,7 @@ def main():
     email["Bcc"] = ",".join(receivers)
     email["Subject"] = config["subject"]
     email["Reply-To"] = sender  # Add Reply-To header.
-    # This will automatically set the current date.
-    email["Date"] = email["Date"]
+    email["Date"] = localtime()
     email["Message-ID"] = make_msgid(domain=sender.split("@")[1])
 
     # Set plain text content.
@@ -68,7 +67,7 @@ def main():
     # Debug log the email headers.
     logger.debug("Email headers:")
     for header, value in email.items():
-        logger.debug("%s: %s", header, value)
+        logger.debug("\t%s: %s", header, value)
 
     # Load file.
     file_path = Path("~/Documents/CV/TR/OzanMalciBilMuhCV.pdf").expanduser()
