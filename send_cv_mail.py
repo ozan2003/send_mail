@@ -6,7 +6,7 @@ import os
 import smtplib
 import textwrap
 from email.message import EmailMessage
-from email.utils import make_msgid, localtime
+from email.utils import localtime, make_msgid
 from logging import getLevelName
 from pathlib import Path
 from typing import Any
