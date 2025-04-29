@@ -53,9 +53,13 @@ def main():
     # Create message.
     email = EmailMessage()
     email["From"] = sender
-    email["To"] = sender # Some mail filters reject blank To's.
-    # Don't let them see each other.
-    email["Bcc"] = ",".join(map(str.strip, receivers))
+    # Set the first receiver as 'To' field.
+    # Some mail filters reject blank To's.
+    email["To"] = receivers[0] if receivers else sender
+    # Add remaining receivers to BCC if there are more than one.
+    # # Don't let them see each other.
+    if len(receivers) > 1:
+        email["Bcc"] = ",".join(map(str.strip, receivers[1:]))
     email["Subject"] = config["subject"]
     email["Reply-To"] = sender  # Add Reply-To header.
     email["Date"] = localtime()
