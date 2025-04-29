@@ -55,7 +55,7 @@ def main():
     email["From"] = sender
     email["To"] = sender # Some mail filters reject blank To's.
     # Don't let them see each other.
-    email["Bcc"] = ",".join(receivers)
+    email["Bcc"] = ",".join(map(str.strip, receivers))
     email["Subject"] = config["subject"]
     email["Reply-To"] = sender  # Add Reply-To header.
     email["Date"] = localtime()
@@ -108,7 +108,7 @@ def main():
         raise
     else:
         logger.info(
-            "Email sent to %s with attachment %s",
+            "Email sent to %r with attachment %r",
             receivers,
             file_name,
         )
@@ -220,7 +220,7 @@ def send_email(
     This function establishes a secure connection with Gmail's SMTP server,
     logs in using the provided credentials, and sends the pre-constructed email message.
 
-    The reciever's email address is set in the EmailMessage object.
+    The receiver's email address is set in the EmailMessage object.
 
     Args:
         sender (str): The sender's email address
