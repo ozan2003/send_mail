@@ -55,23 +55,12 @@ def main():
     receivers: list[str] = args.receiver_emails
 
     # Create message.
-    email = EmailMessage()
-    email["From"] = SENDER
-    email["To"] = SENDER  # Some mail filters reject blank To's.
-    # Don't let them see each other.
-    email["Bcc"] = ",".join(receivers)
-    email["Subject"] = config["subject"]
-    email["Reply-To"] = SENDER  # Add Reply-To header.
-    email["Date"] = localtime()
-    email["Message-ID"] = make_msgid(domain=SENDER.split("@")[1])
-
-    # Set plain text content.
-    email.set_content(config["message"])
-
-    # Debug log the email headers.
-    logger.debug("Email headers:")
-    for header, value in email.items():
-        logger.debug("\t%s: %s", header, value)
+    email = create_email(
+        SENDER,
+        receivers,
+        config,
+        logger,
+    )
 
     # Load file.
     file_path = Path(CV_FILE_PATH).expanduser()
@@ -213,6 +202,59 @@ def parse_toml(toml_path: Path, logger: logging.Logger) -> dict[str, Any]:
         raise OSError(msg) from exc
 
     return data
+
+
+def create_email(
+    sender: str,
+    receivers: list[str],
+    config: dict[str, Any],
+    logger: logging.Logger,
+) -> EmailMessage:
+    """
+    Create an email message.
+
+    Constructs an email message with the specified sender,
+    receiver(s), subject, and message body. It also sets the Reply-To header
+    and the Date header.
+
+    The email is formatted as plain text.
+
+    Args:
+        sender (str): The sender's email address
+        receivers (list[str]): List of recipient(s) email addresses
+        config (dict[str, Any]): Configuration dictionary containing subject and message
+        logger (logging.Logger): Logger object to record operation status
+
+    Returns:
+        EmailMessage: A constructed email message object
+
+    Raises:
+        ValueError: If the sender or receivers are not provided
+        TypeError: If the config does not contain the required keys
+
+    """
+    email = EmailMessage()
+    email["From"] = sender
+    if len(receivers) == 1:
+        email["To"] = receivers[0].strip()
+    else:
+        email["To"] = sender  # Some mail filters reject blank To's.
+        # Don't let them see each other.
+        email["Bcc"] = ",".join(map(str.strip, receivers))
+    email["Subject"] = config["subject"]
+    email["Reply-To"] = sender  # Add Reply-To header.
+    email["Date"] = localtime()
+    email["Message-ID"] = make_msgid(domain=sender.split("@")[1])
+
+    # Set plain text content.
+    email.set_content(config["message"])
+
+    # Debug log the email headers.
+    logger.debug("Email headers:")
+    for header, value in email.items():
+        logger.debug("\t%s: %s", header, value)
+
+    return email
 
 
 def send_email(
