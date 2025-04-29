@@ -14,9 +14,13 @@ from typing import Any
 import tomllib
 
 # Credentials.
-sender = os.environ.get("SAU_MAIL")
+SENDER = os.environ.get("SAU_MAIL")
 # Google wants "app password" instead of my actual password.
-password = os.environ.get("SAU_APP_PASSWD")
+PASSWORD = os.environ.get("SAU_APP_PASSWD")
+
+# Config paths.
+CV_FILE_PATH = "~/Documents/CV/TR/OzanMalciBilMuhCV.pdf"
+CONFIG_FILE_PATH = "~/.config/send_cv.toml"
 
 
 def main():
@@ -31,13 +35,13 @@ def main():
     logger.debug("Logging now set up to %s", getLevelName(logger.level))
 
     # Check if sender and password are set.
-    if sender is None or password is None:
+    if SENDER is None or PASSWORD is None:
         msg = "Environment variables SAU_MAIL and SAU_APP_PASSWD must be set"
         logger.error(msg)
         raise ValueError(msg)
 
     # Read configuration file.
-    config_path = Path("~/.config/send_cv.toml").expanduser()
+    config_path = Path(CONFIG_FILE_PATH).expanduser()
 
     if not config_path.exists():
         msg = f"Configuration file not found at {config_path}"
@@ -52,14 +56,14 @@ def main():
 
     # Create message.
     email = EmailMessage()
-    email["From"] = sender
-    email["To"] = sender # Some mail filters reject blank To's.
+    email["From"] = SENDER
+    email["To"] = SENDER  # Some mail filters reject blank To's.
     # Don't let them see each other.
     email["Bcc"] = ",".join(receivers)
     email["Subject"] = config["subject"]
-    email["Reply-To"] = sender  # Add Reply-To header.
+    email["Reply-To"] = SENDER  # Add Reply-To header.
     email["Date"] = localtime()
-    email["Message-ID"] = make_msgid(domain=sender.split("@")[1])
+    email["Message-ID"] = make_msgid(domain=SENDER.split("@")[1])
 
     # Set plain text content.
     email.set_content(config["message"])
@@ -70,7 +74,7 @@ def main():
         logger.debug("\t%s: %s", header, value)
 
     # Load file.
-    file_path = Path("~/Documents/CV/TR/OzanMalciBilMuhCV.pdf").expanduser()
+    file_path = Path(CV_FILE_PATH).expanduser()
     file_data, file_name = load_file(file_path, logger)
 
     # Determine MIME type.
@@ -88,8 +92,8 @@ def main():
     # Send email.
     try:
         send_email(
-            sender,
-            password,
+            SENDER,
+            PASSWORD,
             email,
             logger,
         )
