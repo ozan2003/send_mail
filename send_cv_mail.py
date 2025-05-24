@@ -23,7 +23,8 @@ CV_FILE_PATH = "~/Documents/CV/TR/OzanMalciBilMuhCV.pdf"
 CONFIG_FILE_PATH = "~/.config/send_cv.toml"
 
 
-def main():
+def main() -> None:
+    """Run the main logic for the script."""
     # Set up command-line argument parsing.
     parser = setup_argparse()
     args = parser.parse_args()
