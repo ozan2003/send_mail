@@ -1,14 +1,18 @@
 #!/usr/bin/python3
 import argparse
+import itertools
 import logging
 import mimetypes
 import os
+import random
 import smtplib
 import textwrap
+from collections.abc import Sequence
 from email.message import EmailMessage
 from email.utils import localtime, make_msgid
 from logging import getLevelName
 from pathlib import Path
+from time import sleep
 from typing import Any
 
 import tomllib
@@ -21,6 +25,10 @@ PASSWORD = os.environ.get("SAU_APP_PASSWD")
 # Config paths.
 CV_FILE_PATH = "~/Documents/CV/TR/OzanMalciBilMuhCV.pdf"
 CONFIG_FILE_PATH = "~/.config/send_cv.toml"
+
+# Mail sending parameters.
+BATCH_SIZE = 95  # Number of emails to send in a single batch.
+SMTP_TIMEOUT = 30.0  # Timeout for the SMTP connection.
 
 
 def main() -> None:
@@ -55,8 +63,8 @@ def main() -> None:
 
     receivers: list[str] = args.receiver_emails
 
-    # Create message.
-    email = create_email(
+    # Create emails.
+    emails = create_emails(
         SENDER,
         receivers,
         config,
@@ -74,19 +82,27 @@ def main() -> None:
     maintype, subtype = content_type.split("/", 1)
     logger.debug("Determined MIME type: %s/%s", maintype, subtype)
 
-    # Add attachment.
-    email.add_attachment(
-        file_data, maintype=maintype, subtype=subtype, filename=file_name
-    )
-
-    # Send email.
+    # Send emails.
     try:
-        send_email(
-            SENDER,
-            PASSWORD,
-            email,
-            logger,
-        )
+        for i, email in enumerate(emails, 1):
+            # Add attachment for each email.
+            email.add_attachment(
+                file_data,
+                maintype=maintype,
+                subtype=subtype,
+                filename=file_name,
+            )
+            # Send individual email.
+            send_email(SENDER, PASSWORD, email, logger)
+
+            logger.info("Sent email %d/%d", i, len(emails))
+
+            # Don't wait for the last email.
+            if i < len(emails):
+                # Wait a random amount of time.
+                wait_time = random.uniform(0.5, 6.5)  # noqa: S311
+                logger.debug("Waiting %2f seconds", wait_time)
+                sleep(wait_time)
     except smtplib.SMTPResponseException as resp_exc:
         logger.exception(
             "SMTP Error: %s - %s",
@@ -179,7 +195,7 @@ def load_file(file_path: Path, logger: logging.Logger) -> tuple[bytes, str]:
 
 def parse_toml(toml_path: Path, logger: logging.Logger) -> dict[str, Any]:
     """
-    Parse a TOML file and return its contents as a dictionary.
+    Parse a TOML file and return its contents.
 
     Args:
         toml_path (Path): Path to the TOML file.
@@ -205,20 +221,21 @@ def parse_toml(toml_path: Path, logger: logging.Logger) -> dict[str, Any]:
     return data
 
 
-def create_email(
+def create_emails(
     sender: str,
     receivers: list[str],
     config: dict[str, Any],
     logger: logging.Logger,
-) -> EmailMessage:
+) -> list[EmailMessage]:
     """
-    Create an email message.
+    Create email messages.
 
-    Constructs an email message with the specified sender,
-    receiver(s), subject, and message body. It also sets the Reply-To header
-    and the Date header.
+    Builds email messages using the provided sender, recipients, subject, and message body.
+    Sets Reply-To and Date headers automatically.
 
-    The email is formatted as plain text.
+    Each email is packed into BATCH_SIZE receivers to avoid hitting limits.
+
+    The emails are formatted as plain text.
 
     Args:
         sender (str): The sender's email address
@@ -227,45 +244,79 @@ def create_email(
         logger (logging.Logger): Logger object to record operation status
 
     Returns:
-        EmailMessage: A constructed email message object
+        list[EmailMessage]: A constructed list of EmailMessage objects
 
     Raises:
         ValueError: If the sender or receivers are not provided
         TypeError: If the config does not contain the required keys
 
     """
-    email = EmailMessage()
-    email["From"] = sender
-    if len(receivers) == 1:
-        email["To"] = receivers[0].strip()
-    else:
-        email["To"] = sender  # Some mail filters reject blank To's.
-        # Don't let them see each other.
-        email["Bcc"] = ",".join(map(str.strip, receivers))
-    email["Subject"] = config["subject"]
-    email["Reply-To"] = sender  # Add Reply-To header.
-    email["Date"] = localtime()
-    email["Message-ID"] = make_msgid(domain=sender.split("@")[1])
 
-    # Set plain text content.
-    email.set_content(config["message"])
+    def build_email_message(
+        sender: str,
+        receivers: Sequence[str],
+        config: dict[str, Any],
+    ) -> EmailMessage:
+        """
+        Build a single email message.
 
-    # Debug log the email headers.
-    logger.debug("Email headers:")
-    for header, value in email.items():
-        logger.debug("\t%s: %s", header, value)
+        Sets the From, To, Bcc, Subject, and Reply-To headers.
+        Sets the Date header automatically.
 
-    return email
+        Args:
+            sender (str): The sender's email address
+            receivers (Sequence[str]): Sequence of recipient(s) email addresses
+            config (dict[str, Any]): Configuration dictionary containing subject and message
+
+        Returns:
+            EmailMessage: A constructed EmailMessage object
+
+        """
+        email = EmailMessage()
+        email["From"] = sender
+
+        if len(receivers) == 1:
+            email["To"] = receivers[0].strip()
+        else:
+            email["To"] = sender  # Some mail filters reject blank To's.
+            # Don't let them see each other.
+            email["Bcc"] = ",".join(map(str.strip, receivers))
+
+        email["Subject"] = config["subject"]
+        email["Reply-To"] = sender  # Add Reply-To header.
+        email["Date"] = localtime()
+        email["Message-ID"] = make_msgid(domain=sender.split("@")[1])
+        # Set plain text content.
+        email.set_content(config["message"])
+
+        return email
+
+    emails: list[EmailMessage] = []
+
+    for i, receiver_pack in enumerate(
+        itertools.batched(receivers, BATCH_SIZE)
+    ):
+        # Assign each batch a mail message.
+        email = build_email_message(sender, receiver_pack, config)
+
+        # Debug log the email headers.
+        logger.debug("Email header %d:", i)
+        for header, value in email.items():
+            logger.debug("\t%s: %s", header, value)
+
+        emails.append(email)
+
+    return emails
 
 
 def send_email(
     sender: str, password: str, email: EmailMessage, logger: logging.Logger
 ) -> None:
     """
-    Send an email using Gmail's SMTP server.
+    Send a single email using Gmail's SMTP server.
 
-    This function establishes a secure connection with Gmail's SMTP server,
-    logs in using the provided credentials, and sends the pre-constructed email message.
+    Establishes a secure SSL connection to Gmail's SMTP server,
+    authenticates with the given credentials, and transmits the email message.
 
     The reciever's email address is set in the EmailMessage object.
 
@@ -284,8 +335,7 @@ def send_email(
         TimeoutError: If the connection or operations time out
 
     """
-    # Timeout is 30 seconds.
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30.0) as smtp:
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=SMTP_TIMEOUT) as smtp:
         logger.debug("Established connection to SMTP server")
 
         smtp.login(sender, password)
