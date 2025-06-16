@@ -30,6 +30,9 @@ CONFIG_FILE_PATH = "~/.config/send_cv.toml"
 BATCH_SIZE = 95  # Number of emails to send in a single batch.
 SMTP_TIMEOUT = 30.0  # Timeout for the SMTP connection.
 
+# Configure logging.
+logger = logging.getLogger(__name__)
+
 
 def main() -> None:
     """Run the main logic for the script."""
@@ -37,9 +40,11 @@ def main() -> None:
     parser = setup_argparse()
     args = parser.parse_args()
 
-    # Configure logging.
-    logging.basicConfig(format="%(asctime)s - %(levelname)s - %(message)s")
-    logger = logging.getLogger(__name__)
+    # Configure logging based on args
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        level=args.loglevel.upper(),
+    )
     logger.setLevel(args.loglevel.upper())
     logger.debug("Logging now set up to %s", getLevelName(logger.level))
 
@@ -59,21 +64,16 @@ def main() -> None:
     logger.debug("Configuration file found at %s", config_path)
 
     # Read configuration file.
-    config = parse_toml(config_path, logger)
+    config = parse_toml(config_path)
 
     receivers: list[str] = args.receiver_emails
 
     # Create emails.
-    emails = create_emails(
-        SENDER,
-        receivers,
-        config,
-        logger,
-    )
+    emails = create_emails(SENDER, receivers, config)
 
     # Load file.
     file_path = Path(CV_FILE_PATH).expanduser()
-    file_data, file_name = load_file(file_path, logger)
+    file_data, file_name = load_file(file_path)
 
     # Determine MIME type.
     content_type = (
@@ -93,7 +93,7 @@ def main() -> None:
                 filename=file_name,
             )
             # Send individual email.
-            send_email(SENDER, PASSWORD, email, logger)
+            send_email(SENDER, PASSWORD, email)
 
             logger.info("Sent email %d/%d", i, len(emails))
 
@@ -158,13 +158,12 @@ def setup_argparse() -> argparse.ArgumentParser:
     return parser
 
 
-def load_file(file_path: Path, logger: logging.Logger) -> tuple[bytes, str]:
+def load_file(file_path: Path) -> tuple[bytes, str]:
     """
     Load a file and return its content and name.
 
     Args:
         file_path (Path): Path to the file.
-        logger (logging.Logger): Logger instance for logging.
 
     Returns:
         tuple[bytes, str]: Tuple containing the content and its name.
@@ -193,13 +192,12 @@ def load_file(file_path: Path, logger: logging.Logger) -> tuple[bytes, str]:
     return file_data, file_name
 
 
-def parse_toml(toml_path: Path, logger: logging.Logger) -> dict[str, Any]:
+def parse_toml(toml_path: Path) -> dict[str, Any]:
     """
     Parse a TOML file and return its contents.
 
     Args:
         toml_path (Path): Path to the TOML file.
-        logger (logging.Logger): Logger instance for logging.
 
     Returns:
         dict[str, Any]: Dictionary containing the parsed TOML data.
@@ -222,10 +220,7 @@ def parse_toml(toml_path: Path, logger: logging.Logger) -> dict[str, Any]:
 
 
 def create_emails(
-    sender: str,
-    receivers: list[str],
-    config: dict[str, Any],
-    logger: logging.Logger,
+    sender: str, receivers: list[str], config: dict[str, Any]
 ) -> list[EmailMessage]:
     """
     Create email messages.
@@ -241,7 +236,6 @@ def create_emails(
         sender (str): The sender's email address
         receivers (list[str]): List of recipient(s) email addresses
         config (dict[str, Any]): Configuration dictionary containing subject and message
-        logger (logging.Logger): Logger object to record operation status
 
     Returns:
         list[EmailMessage]: A constructed list of EmailMessage objects
@@ -309,9 +303,7 @@ def create_emails(
     return emails
 
 
-def send_email(
-    sender: str, password: str, email: EmailMessage, logger: logging.Logger
-) -> None:
+def send_email(sender: str, password: str, email: EmailMessage) -> None:
     """
     Send a single email using Gmail's SMTP server.
 
@@ -324,7 +316,6 @@ def send_email(
         sender (str): The sender's email address
         password (str): The password or app-specific password for the account
         email (EmailMessage): A pre-constructed EmailMessage object to be sent
-        logger (logging.Logger): Logger object to record operation status
 
     Returns:
         None
