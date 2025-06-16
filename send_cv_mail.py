@@ -4,7 +4,6 @@ import itertools
 import logging
 import mimetypes
 import os
-import random
 import smtplib
 import textwrap
 from collections.abc import Sequence
@@ -12,7 +11,6 @@ from email.message import EmailMessage
 from email.utils import localtime, make_msgid
 from logging import getLevelName
 from pathlib import Path
-from time import sleep
 from typing import Any
 
 import tomllib
@@ -27,7 +25,7 @@ CV_FILE_PATH = "~/Documents/CV/TR/OzanMalciBilMuhCV.pdf"
 CONFIG_FILE_PATH = "~/.config/send_cv.toml"
 
 # Mail sending parameters.
-BATCH_SIZE = 95  # Number of emails to send in a single batch.
+BATCH_SIZE = 20  # Number of emails to send in a single batch.
 SMTP_TIMEOUT = 30.0  # Timeout for the SMTP connection.
 
 # Configure logging.
@@ -82,27 +80,18 @@ def main() -> None:
     maintype, subtype = content_type.split("/", 1)
     logger.debug("Determined MIME type: %s/%s", maintype, subtype)
 
+    # Add attachment for each email.
+    for email in emails:
+        email.add_attachment(
+            file_data,
+            maintype=maintype,
+            subtype=subtype,
+            filename=file_name,
+        )
+
     # Send emails.
     try:
-        for i, email in enumerate(emails, 1):
-            # Add attachment for each email.
-            email.add_attachment(
-                file_data,
-                maintype=maintype,
-                subtype=subtype,
-                filename=file_name,
-            )
-            # Send individual email.
-            send_email(SENDER, PASSWORD, email)
-
-            logger.info("Sent email %d/%d", i, len(emails))
-
-            # Don't wait for the last email.
-            if i < len(emails):
-                # Wait a random amount of time.
-                wait_time = random.uniform(0.5, 6.5)  # noqa: S311
-                logger.debug("Waiting %2f seconds", wait_time)
-                sleep(wait_time)
+        send_emails(SENDER, PASSWORD, emails)
     except smtplib.SMTPResponseException as resp_exc:
         logger.exception(
             "SMTP Error: %s - %s",
@@ -118,7 +107,8 @@ def main() -> None:
         raise
     else:
         logger.info(
-            "Email sent to %s with attachment %s",
+            "Email%s sent to %s with attachment %s sent successfully",
+            "s" if len(receivers) > 1 else "",
             receivers,
             file_name,
         )
@@ -303,9 +293,11 @@ def create_emails(
     return emails
 
 
-def send_email(sender: str, password: str, email: EmailMessage) -> None:
+def send_emails(
+    sender: str, password: str, emails: Sequence[EmailMessage]
+) -> None:
     """
-    Send a single email using Gmail's SMTP server.
+    Send a sequence of emails using Gmail's SMTP server.
 
     Establishes a secure SSL connection to Gmail's SMTP server,
     authenticates with the given credentials, and transmits the email message.
@@ -315,7 +307,7 @@ def send_email(sender: str, password: str, email: EmailMessage) -> None:
     Args:
         sender (str): The sender's email address
         password (str): The password or app-specific password for the account
-        email (EmailMessage): A pre-constructed EmailMessage object to be sent
+        emails (Sequence[EmailMessage]): A sequence of EmailMessage objects to be sent
 
     Returns:
         None
@@ -328,12 +320,12 @@ def send_email(sender: str, password: str, email: EmailMessage) -> None:
     """
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=SMTP_TIMEOUT) as smtp:
         logger.debug("Established connection to SMTP server")
-
         smtp.login(sender, password)
         logger.debug("Successfully logged in to SMTP server")
 
-        smtp.send_message(email)
-        logger.debug("Message sent to SMTP server")
+        for i, email in enumerate(emails, 1):
+            smtp.send_message(email)
+            logger.debug("Sent email %d/%d", i, len(emails))
 
 
 if __name__ == "__main__":
