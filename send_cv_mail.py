@@ -16,9 +16,9 @@ from typing import Any
 import tomllib
 
 # Credentials.
-SENDER = os.environ.get("SAU_MAIL")
+SENDER = os.environ["SAU_MAIL"]
 # Google wants "app password" instead of my actual password.
-PASSWORD = os.environ.get("SAU_APP_PASSWD")
+PASSWORD = os.environ["SAU_APP_PASSWD"]
 
 # Config paths.
 CV_FILE_PATH = "~/Documents/CV/TR/OzanMalciBilMuhCV.pdf"
@@ -45,12 +45,6 @@ def main() -> None:
     )
     logger.setLevel(args.loglevel.upper())
     logger.debug("Logging now set up to %s", getLevelName(logger.level))
-
-    # Check if sender and password are set.
-    if SENDER is None or PASSWORD is None:
-        msg = "Environment variables SAU_MAIL and SAU_APP_PASSWD must be set"
-        logger.error(msg)
-        raise ValueError(msg)
 
     # Read configuration file.
     config_path = Path(CONFIG_FILE_PATH).expanduser()
