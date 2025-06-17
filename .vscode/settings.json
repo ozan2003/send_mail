@@ -1,0 +1,43 @@
+{
+    "python.analysis.typeCheckingMode": "strict",
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.diagnosticSeverityOverrides": {
+        "reportUnknownMemberType": "none"
+    },
+    "ruff.lint.extendSelect": [
+        "ALL"
+    ],
+    "ruff.lint.ignore": [
+        "COM812", // missing-trailing-comma
+        "CPY001", // Missing copyright notice at top of file
+        "D100", // ignore missing docs
+        "D101",
+        "D102",
+        "D103",
+        "D104",
+        "D105",
+        "D106",
+        "D107",
+        "D200",
+        "D205",
+        "D212", // Multi-line docstring starts with a new line
+        "D400",
+        "D401",
+        "D415",
+        "D203", // blank line required before class docstring
+        "D211", // no-blank-line-before-class
+        "D213", // multi-line-summary-second-line
+        "EM101", // raw-string-in-exception
+        "E402", // false positives for local imports
+        "E501", // Formatter will deal with it, i don't care otherwise.
+        "ERA001", // I comment out code often.
+        "FIX002", // line-contains-todo
+        "ISC001", // Conflicts with formatter ruff
+        "PLR0904", // Too many public methods (... > 20)
+        "TD002", // Missing author in TODO `# TODO(<author_name>): ...`
+        "TD003", // missing-todo-link
+        "TRY003", // raise-vanilla-args
+        "T201", // nothing wrong with print
+    ],
+    "ruff.lineLength": 79 // pep 8
+}
