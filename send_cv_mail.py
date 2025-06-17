@@ -4,6 +4,7 @@ import itertools
 import logging
 import mimetypes
 import os
+import re
 import smtplib
 import textwrap
 from collections.abc import Sequence
@@ -58,7 +59,28 @@ def main() -> None:
     # Read configuration file.
     config = parse_toml(config_path)
 
-    receivers: list[str] = args.receiver_emails
+    # Handle receiver emails based on which argument was provided
+    if args.emails:
+        receivers: list[str] = args.emails
+        logger.debug("Using receiver emails from command line: %s", receivers)
+    elif args.emails_file:
+        logger.debug("Using receiver emails from file: %s", args.emails_file)
+
+        emails_file_path = Path(args.emails_file).expanduser()
+        receivers: list[str] = load_emails_from_file(emails_file_path)
+
+        logger.debug(
+            "Loaded %d emails from file: %s", len(receivers), args.emails_file
+        )
+
+        if len(receivers) == 0:
+            msg = f"No emails found in the file '{args.emails_file}'"
+            raise ValueError(msg)
+    else:
+        # This shouldn't happen due to mutually_exclusive_group(required=True)
+        msg = "No receiver emails provided"
+        logger.error(msg)
+        raise ValueError(msg)
 
     # Create emails.
     emails = create_emails(SENDER, receivers, config)
@@ -126,11 +148,20 @@ def setup_argparse() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
-    parser.add_argument(
-        "receiver_emails",
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument(
+        "-e",
+        "--emails",
         type=str,
         nargs="+",
         help="Email address of the recipient(s)",
+    )
+
+    group.add_argument(
+        "-f",
+        "--emails-file",
+        type=str,
+        help="Path to the file containing email addresses",
     )
 
     parser.add_argument(
@@ -201,6 +232,48 @@ def parse_toml(toml_path: Path) -> dict[str, Any]:
         raise OSError(msg) from exc
 
     return data
+
+
+def load_emails_from_file(file_path: Path) -> list[str]:
+    """
+    Load email addresses from a file.
+
+    Args:
+        file_path (Path): Path to the file containing email addresses.
+
+    Returns:
+        list[str]: List of email addresses.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
+        OSError: If the file cannot be read.
+
+    """
+    if not file_path.exists():
+        msg = f"Emails file not found at {file_path}"
+        logger.error(msg)
+        raise FileNotFoundError(msg)
+
+    email_pattern = re.compile(
+        r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)"
+    )
+
+    try:
+        with file_path.open("r", encoding="utf-8") as fp:
+            emails = [
+                email
+                for line in fp
+                if len(email := line.strip()) > 0
+                and email_pattern.match(email)
+            ]
+            logger.debug(
+                "Successfully loaded %d email addresses from file", len(emails)
+            )
+            return emails
+    except (OSError, PermissionError) as exc:
+        msg = f"Failed to read emails file: {exc}"
+        logger.exception(msg)
+        raise OSError(msg) from exc
 
 
 def create_emails(
