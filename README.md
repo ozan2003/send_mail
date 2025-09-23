@@ -9,8 +9,8 @@
 
 If you want to use this script as is, you will need to configure the following:
 
-- Mail address and password as environment variables. (default names: `SAU_MAIL` and `SAU_APP_PASSWD`)
-- The mail subject and body in a .toml file. (default path: `~/.config/send_cv.toml`)
-- The CV file path. (default path: `~/Documents/CV/TR/OzanMalciBilMuhCV.pdf`)
+- Mail address and password as environment variables. (default names: `SENDER` and `PASSWORD`)
+- The mail subject and body in a .toml file. (`CONFIG_FILE_PATH`)
+- The CV file path. (`CV_FILE_PATH`)
 
 Refer to `-h/--help` for usage.

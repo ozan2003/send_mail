@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 import argparse
 import itertools
 import logging
@@ -15,15 +15,17 @@ from pathlib import Path
 from typing import Any
 
 import tomllib
+from dotenv import load_dotenv
+
+load_dotenv(".env")
 
 # Credentials.
-SENDER = os.environ["SAU_MAIL"]
-# Google wants "app password" instead of my actual password.
-PASSWORD = os.environ["SAU_APP_PASSWD"]
+SENDER = os.environ["SENDER"]
+PASSWORD = os.environ["PASSWORD"]
 
 # Config paths.
-CV_FILE_PATH = "~/Documents/CV/TR/OzanMalciBilMuhCV.pdf"
-CONFIG_FILE_PATH = "~/.config/send_cv.toml"
+CV_FILE_PATH = os.path.expandvars(os.environ["CV_FILE_PATH"])
+CONFIG_FILE_PATH = os.path.expandvars(os.environ["CONFIG_FILE_PATH"])
 
 # Mail sending parameters.
 BATCH_SIZE = 20  # Number of emails to send in a single batch.
@@ -142,8 +144,10 @@ def setup_argparse() -> argparse.ArgumentParser:
         description="Email sender script that sends an email with a attachment.",
         epilog=textwrap.dedent("""
                 Environment variables required:
-                    SAU_MAIL: The sender's email address
-                    SAU_APP_PASSWD: The sender's password
+                    - SENDER: The sender's email address
+                    - PASSWORD: The password or app-specific password for the account
+                    - CV_FILE_PATH: Path to the file to be attached
+                    - CONFIG_FILE_PATH: Path to the configuration file
                 """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
