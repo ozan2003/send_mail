@@ -20,12 +20,22 @@ from dotenv import load_dotenv
 load_dotenv(".env")
 
 # Credentials.
-SENDER = os.environ["SENDER"]
-PASSWORD = os.environ["PASSWORD"]
+SENDER = os.getenv("SENDER")
+PASSWORD = os.getenv("PASSWORD")
+
+if SENDER is None or PASSWORD is None:
+    raise OSError("SENDER or PASSWORD environment variable not set")
 
 # Config paths.
-CV_FILE_PATH = os.path.expandvars(os.environ["CV_FILE_PATH"])
-CONFIG_FILE_PATH = os.path.expandvars(os.environ["CONFIG_FILE_PATH"])
+if (cv_path := os.getenv("CV_FILE_PATH")) is not None:
+    CV_FILE_PATH = os.path.expandvars(cv_path)
+else:
+    raise OSError("CV_FILE_PATH environment variable not set")
+
+if (config_path := os.getenv("CONFIG_FILE_PATH")) is not None:
+    CONFIG_FILE_PATH = os.path.expandvars(config_path)
+else:
+    raise OSError("CONFIG_FILE_PATH environment variable not set")
 
 # Mail sending parameters.
 BATCH_SIZE = 20  # Number of emails to send in a single batch.
@@ -85,7 +95,7 @@ def main() -> None:
         raise ValueError(msg)
 
     # Create emails.
-    emails = create_emails(SENDER, receivers, config)
+    emails = create_emails(SENDER, receivers, config)  # pyright: ignore[reportArgumentType]
 
     # Load file.
     file_path = Path(CV_FILE_PATH).expanduser()
@@ -109,7 +119,7 @@ def main() -> None:
 
     # Send emails.
     try:
-        send_emails(SENDER, PASSWORD, emails)
+        send_emails(SENDER, PASSWORD, emails)  # pyright: ignore[reportArgumentType]
     except smtplib.SMTPResponseException as resp_exc:
         logger.exception(
             "SMTP Error: %s - %s",
