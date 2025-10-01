@@ -17,14 +17,18 @@ from typing import Any
 import tomllib
 from dotenv import load_dotenv
 
-load_dotenv(".env")
+script_dir = Path(__file__).resolve().parent
+
+load_dotenv(script_dir / ".env")
 
 # Credentials.
 SENDER = os.getenv("SENDER")
 PASSWORD = os.getenv("PASSWORD")
 
-if SENDER is None or PASSWORD is None:
-    raise OSError("SENDER or PASSWORD environment variable not set")
+if SENDER is None:
+    raise OSError("SENDER environment variable not set")
+if PASSWORD is None:
+    raise OSError("PASSWORD environment variable not set")
 
 # Config paths.
 if (cv_path := os.getenv("CV_FILE_PATH")) is not None:
