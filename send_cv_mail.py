@@ -103,7 +103,7 @@ def main() -> None:
 
     # Load file.
     file_path = Path(CV_FILE_PATH).expanduser()
-    file_data, file_name = load_file(file_path)
+    file_name, file_data = load_file(file_path)
 
     # Determine MIME type.
     content_type = (
@@ -191,7 +191,7 @@ def setup_argparse() -> argparse.ArgumentParser:
     return parser
 
 
-def load_file(file_path: Path) -> tuple[bytes, str]:
+def load_file(file_path: Path) -> tuple[str, bytes]:
     """
     Load a file and return its content and name.
 
@@ -199,7 +199,7 @@ def load_file(file_path: Path) -> tuple[bytes, str]:
         file_path (Path): Path to the file.
 
     Returns:
-        tuple[bytes, str]: Tuple containing the content and its name.
+        tuple[str, bytes]: Tuple containing the name and its content.
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -222,7 +222,7 @@ def load_file(file_path: Path) -> tuple[bytes, str]:
         logger.exception(msg)
         raise
 
-    return file_data, file_name
+    return file_name, file_data
 
 
 def parse_toml(toml_path: Path) -> dict[str, Any]:
