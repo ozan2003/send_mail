@@ -12,6 +12,9 @@ from email.message import EmailMessage
 from email.utils import localtime, make_msgid
 from logging import getLevelName
 from pathlib import Path
+from random import uniform
+from sys import version_info
+from time import sleep
 from typing import Any
 
 import tomllib
@@ -44,6 +47,11 @@ else:
 # Mail sending parameters.
 BATCH_SIZE = 20  # Number of emails to send in a single batch.
 SMTP_TIMEOUT = 30.0  # Timeout for the SMTP connection.
+WAIT_TIMES = (
+    3.0,
+    9.0,
+)  # Range of wait times between sending emails (in seconds).
+ATTEMPT_LIMIT = 5  # Number of attempts to send an email.
 
 # Configure logging.
 logger = logging.getLogger(__name__)
@@ -59,6 +67,7 @@ def main() -> None:
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(message)s",
         level=args.loglevel.upper(),
+        datefmt="%Y-%m-%dT%H:%M:%S",
     )
     logger.setLevel(args.loglevel.upper())
     logger.debug("Logging now set up to %s", getLevelName(logger.level))
@@ -139,11 +148,11 @@ def main() -> None:
         raise
     else:
         logger.info(
-            "Email%s sent to %s with attachment %s sent successfully",
-            "s" if len(receivers) > 1 else "",
-            receivers,
+            "Sent %d email(s) with attachment %s",
+            len(receivers),
             file_name,
         )
+        logger.debug("Full recipient list: %s", receivers)
 
 
 def setup_argparse() -> argparse.ArgumentParser:
@@ -321,7 +330,7 @@ def create_emails(
 
     """
 
-    def build_email_message(
+    def build_single_email_message(
         sender: str,
         receivers: Sequence[str],
         config: dict[str, Any],
@@ -354,9 +363,12 @@ def create_emails(
         email["Subject"] = config["subject"]
         email["Reply-To"] = sender  # Add Reply-To header.
         email["Date"] = localtime()
-        email["Message-ID"] = make_msgid(domain=sender.split("@")[1])
+        email["Message-ID"] = make_msgid(domain=sender.split("@", 1)[1])
+        email["User-Agent"] = (
+            f"smtplib (Python {version_info.major}.{version_info.minor})"
+        )
         # Set plain text content.
-        email.set_content(config["message"])
+        email.set_content(config["message"], subtype="plain", charset="utf-8")
 
         return email
 
@@ -366,7 +378,7 @@ def create_emails(
         itertools.batched(receivers, BATCH_SIZE)
     ):
         # Assign each batch a mail message.
-        email = build_email_message(sender, receiver_pack, config)
+        email = build_single_email_message(sender, receiver_pack, config)
 
         # Debug log the email headers.
         logger.debug("Email header %d:", i)
@@ -401,16 +413,40 @@ def send_emails(
         smtplib.SMTPAuthenticationError: If authentication fails
         smtplib.SMTPException: If any SMTP-related error occurs during sending
         TimeoutError: If the connection or operations time out
+        RuntimeError: If sending an email fails after the maximum number of attempts
 
     """
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=SMTP_TIMEOUT) as smtp:
+    # Take wait times into account, 1.5 is margin for safety.
+    timeout = 1.5 * SMTP_TIMEOUT + len(emails) * WAIT_TIMES[1]
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=timeout) as smtp:
         logger.debug("Established connection to SMTP server")
         smtp.login(sender, password)
         logger.debug("Successfully logged in to SMTP server")
 
         for i, email in enumerate(emails, 1):
-            smtp.send_message(email)
-            logger.debug("Sent email %d/%d", i, len(emails))
+            for attempt in range(1, ATTEMPT_LIMIT + 1):
+                try:
+                    smtp.send_message(email)
+
+                    logger.debug("Sent email %d/%d", i, len(emails))
+                    if i < len(emails):
+                        wait_time = uniform(*WAIT_TIMES)  # noqa: S311
+                        logger.debug(
+                            "Waiting for %.2f seconds before sending next email",
+                            wait_time,
+                        )
+                        sleep(wait_time)
+                    break  # success, exit the retry loop
+                except smtplib.SMTPException as exc:
+                    code = getattr(exc, "smtp_code", None)
+                    if code in (421, 450, 451, 452):
+                        sleep(2**attempt + uniform(0, 1))  # noqa: S311
+                        continue  # retry
+                    raise
+            else:
+                msg = f"Failed to send email to {email['To']} after {ATTEMPT_LIMIT} attempts"
+                raise RuntimeError(msg)
 
 
 if __name__ == "__main__":
