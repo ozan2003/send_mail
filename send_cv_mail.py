@@ -29,28 +29,29 @@ SENDER = os.getenv("SENDER")
 PASSWORD = os.getenv("PASSWORD")
 
 if SENDER is None:
-    raise OSError("SENDER environment variable not set")
+    msg = "SENDER environment variable not set"
+    raise OSError(msg)
 if PASSWORD is None:
-    raise OSError("PASSWORD environment variable not set")
+    msg = "PASSWORD environment variable not set"
+    raise OSError(msg)
 
 # Config paths.
 if (cv_path := os.getenv("CV_FILE_PATH")) is not None:
     CV_FILE_PATH = os.path.expandvars(cv_path)
 else:
-    raise OSError("CV_FILE_PATH environment variable not set")
+    msg = "CV_FILE_PATH environment variable not set"
+    raise OSError(msg)
 
 if (config_path := os.getenv("CONFIG_FILE_PATH")) is not None:
     CONFIG_FILE_PATH = os.path.expandvars(config_path)
 else:
-    raise OSError("CONFIG_FILE_PATH environment variable not set")
+    msg = "CONFIG_FILE_PATH environment variable not set"
+    raise OSError(msg)
 
 # Mail sending parameters.
-BATCH_SIZE = 20  # Number of emails to send in a single batch.
 SMTP_TIMEOUT = 30.0  # Timeout for the SMTP connection.
-WAIT_TIMES = (
-    3.0,
-    9.0,
-)  # Range of wait times between sending emails (in seconds).
+# Range of wait times between sending emails (in seconds).
+WAIT_TIMES = (3.0, 9.0)
 ATTEMPT_LIMIT = 5  # Number of attempts to send an email.
 
 # Configure logging.
@@ -62,6 +63,13 @@ def main() -> None:
     # Set up command-line argument parsing.
     parser = setup_argparse()
     args = parser.parse_args()
+
+    batch_size = args.batch_size
+
+    if batch_size < 1:
+        msg = "Batch size must be at least 1"
+        logger.error(msg)
+        raise ValueError(msg)
 
     # Configure logging based on args
     logging.basicConfig(
@@ -102,14 +110,18 @@ def main() -> None:
             msg = f"No emails found in the file '{args.emails_file}'"
             raise ValueError(msg)
     else:
-        # This shouldn't happen due to mutually_exclusive_group(required=True)
+        # This shouldn't happen due to mutually exclusive group
         msg = "No receiver emails provided"
         logger.error(msg)
         raise ValueError(msg)
 
     # Create emails.
-    emails = create_emails(SENDER, receivers, config)  # pyright: ignore[reportArgumentType]
-
+    emails = create_emails(
+        SENDER,  # pyright: ignore[reportArgumentType]
+        receivers,
+        config=config,
+        batch_size=batch_size,
+    )
     # Load file.
     file_path = Path(CV_FILE_PATH).expanduser()
     file_name, file_data = load_file(file_path)
@@ -149,7 +161,7 @@ def main() -> None:
     else:
         logger.info(
             "Sent %d email(s) with attachment %s",
-            len(receivers),
+            len(emails),
             file_name,
         )
         logger.debug("Full recipient list: %s", receivers)
@@ -183,7 +195,6 @@ def setup_argparse() -> argparse.ArgumentParser:
         nargs="+",
         help="Email address of the recipient(s)",
     )
-
     group.add_argument(
         "-f",
         "--emails-file",
@@ -192,9 +203,17 @@ def setup_argparse() -> argparse.ArgumentParser:
     )
 
     parser.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        default=3,
+        help="Number of emails to send in a single batch",
+    )
+    parser.add_argument(
         "-log",
         "--loglevel",
         default="info",
+        choices=("debug", "info", "warning", "error", "critical"),
         help="Provide logging level",
     )
     return parser
@@ -304,7 +323,11 @@ def load_emails_from_file(file_path: Path) -> list[str]:
 
 
 def create_emails(
-    sender: str, receivers: list[str], config: dict[str, Any]
+    sender: str,
+    receivers: list[str],
+    *,
+    config: dict[str, Any],
+    batch_size: int,
 ) -> list[EmailMessage]:
     """
     Create email messages.
@@ -375,7 +398,7 @@ def create_emails(
     emails: list[EmailMessage] = []
 
     for i, receiver_pack in enumerate(
-        itertools.batched(receivers, BATCH_SIZE)
+        itertools.batched(receivers, batch_size)
     ):
         # Assign each batch a mail message.
         email = build_single_email_message(sender, receiver_pack, config)
@@ -439,11 +462,15 @@ def send_emails(
                         sleep(wait_time)
                     break  # success, exit the retry loop
                 except smtplib.SMTPException as exc:
-                    code = getattr(exc, "smtp_code", None)
-                    if code in (421, 450, 451, 452):
-                        sleep(2**attempt + uniform(0, 1))  # noqa: S311
-                        continue  # retry
-                    raise
+                    if getattr(exc, "smtp_code", None) not in (
+                        421,
+                        450,
+                        451,
+                        452,
+                    ):
+                        raise
+                    sleep(2**attempt + uniform(0, 1))  # noqa: S311
+                    continue  # retry
             else:
                 msg = f"Failed to send email to {email['To']} after {ATTEMPT_LIMIT} attempts"
                 raise RuntimeError(msg)
