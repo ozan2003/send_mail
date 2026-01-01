@@ -10,6 +10,7 @@
     },
     "ruff.lint.select": [
         "E",
+        "EM",
         "W",
         "F",
         "I",
@@ -34,7 +35,7 @@
         "ANN",
         "D101",
         "D102",
-        "D103"
+        "D103",
     ],
     "ruff.lint.ignore": [
         "E501",
