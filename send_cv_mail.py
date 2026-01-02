@@ -401,6 +401,7 @@ def create_emails(
         itertools.batched(receivers, batch_size)
     ):
         # Assign each batch a mail message.
+        # if batch size is 1, the receiver will be added to the To header.
         email = build_single_email_message(sender, receiver_pack, config)
 
         # Debug log the email headers.
