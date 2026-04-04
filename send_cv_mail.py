@@ -24,16 +24,30 @@ script_dir = Path(__file__).resolve().parent
 
 load_dotenv(script_dir / ".env")
 
-# Credentials.
-SENDER = os.getenv("SENDER")
-PASSWORD = os.getenv("PASSWORD")
 
-if SENDER is None:
-    msg = "SENDER environment variable not set"
-    raise OSError(msg)
-if PASSWORD is None:
-    msg = "PASSWORD environment variable not set"
-    raise OSError(msg)
+# Credentials.
+def require_env(name: str) -> str:
+    """
+    Retrieve the value of an environment variable, ensuring it is set and not empty.
+
+    Args:
+        name (str): The name of the environment variable to retrieve.
+
+    Returns:
+        str: The value of the environment variable.
+
+    Raises:
+        OSError: If the environment variable is not set or is empty.
+    """
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        msg = f"{name} environment variable not set"
+        raise OSError(msg)
+    return value
+
+
+SENDER = require_env("SENDER")
+PASSWORD = require_env("PASSWORD")
 
 # Config paths.
 if (cv_path := os.getenv("CV_FILE_PATH")) is not None:
@@ -93,14 +107,16 @@ def main() -> None:
     config = parse_toml(config_path)
 
     # Handle receiver emails based on which argument was provided
+    receivers: list[str]
+
     if args.emails:
-        receivers: list[str] = args.emails
+        receivers = args.emails
         logger.debug("Using receiver emails from command line: %s", receivers)
     elif args.emails_file:
         logger.debug("Using receiver emails from file: %s", args.emails_file)
 
         emails_file_path = Path(args.emails_file).expanduser()
-        receivers: list[str] = load_emails_from_file(emails_file_path)
+        receivers = load_emails_from_file(emails_file_path)
 
         logger.debug(
             "Loaded %d emails from file: %s", len(receivers), args.emails_file
@@ -117,7 +133,7 @@ def main() -> None:
 
     # Create emails.
     emails = create_emails(
-        SENDER,  # pyright: ignore[reportArgumentType]
+        SENDER,
         receivers,
         config=config,
         batch_size=batch_size,
@@ -144,7 +160,7 @@ def main() -> None:
 
     # Send emails.
     try:
-        send_emails(SENDER, PASSWORD, emails)  # pyright: ignore[reportArgumentType]
+        send_emails(SENDER, PASSWORD, emails)
     except smtplib.SMTPResponseException as resp_exc:
         logger.exception(
             "SMTP Error: %s - %s",
