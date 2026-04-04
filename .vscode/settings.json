@@ -61,5 +61,6 @@
         "A003"
     ],
     "ruff.lineLength": 79, // pep 8
-    "basedpyright.analysis.configFilePath": ".vscode/basedpyright.json"
+    "basedpyright.analysis.configFilePath": ".vscode/basedpyright.json",
+    "basedpyright.analysis.typeCheckingMode": "recommended"
 }
