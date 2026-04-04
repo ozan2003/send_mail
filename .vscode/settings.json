@@ -60,5 +60,6 @@
         "SIM108",
         "A003"
     ],
-    "ruff.lineLength": 79 // pep 8
+    "ruff.lineLength": 79, // pep 8
+    "basedpyright.analysis.configFilePath": ".vscode/basedpyright.json"
 }
