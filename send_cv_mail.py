@@ -7,7 +7,7 @@ import os
 import re
 import smtplib
 import textwrap
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from email.message import EmailMessage
 from email.utils import localtime, make_msgid
 from logging import getLevelName
@@ -112,18 +112,16 @@ def main() -> None:
     if args.emails:
         receivers = args.emails
         logger.debug("Using receiver emails from command line: %s", receivers)
-    elif args.emails_file:
-        logger.debug("Using receiver emails from file: %s", args.emails_file)
+    elif args.emails_files:
+        logger.debug("Using receiver emails from files: %s", args.emails_files)
 
-        emails_file_path = Path(args.emails_file).expanduser()
-        receivers = load_emails_from_file(emails_file_path)
-
-        logger.debug(
-            "Loaded %d emails from file: %s", len(receivers), args.emails_file
+        emails_file_paths: Iterable[Path] = (
+            Path(path).expanduser() for path in args.emails_files
         )
+        receivers = load_emails_from_files(emails_file_paths)
 
         if len(receivers) == 0:
-            msg = f"No emails found in the file '{args.emails_file}'"
+            msg = f"No emails found in the files '{args.emails_files}'"
             raise ValueError(msg)
     else:
         # This shouldn't happen due to mutually exclusive group
@@ -139,12 +137,12 @@ def main() -> None:
         batch_size=batch_size,
     )
     # Load file.
-    file_path = Path(CV_FILE_PATH).expanduser()
-    file_name, file_data = load_file(file_path)
+    cv_path = Path(CV_FILE_PATH).expanduser()
+    cv_name, cv_data = load_file(cv_path)
 
     # Determine MIME type.
     content_type = (
-        mimetypes.guess_type(str(file_path))[0] or "application/octet-stream"
+        mimetypes.guess_type(str(cv_path))[0] or "application/octet-stream"
     )
     maintype, subtype = content_type.split("/", 1)
     logger.debug("Determined MIME type: %s/%s", maintype, subtype)
@@ -152,10 +150,10 @@ def main() -> None:
     # Add attachment for each email.
     for email in emails:
         email.add_attachment(
-            file_data,
+            cv_data,
             maintype=maintype,
             subtype=subtype,
-            filename=file_name,
+            filename=cv_name,
         )
 
     # Send emails.
@@ -178,7 +176,7 @@ def main() -> None:
         logger.info(
             "Sent %d email(s) with attachment %s",
             len(emails),
-            file_name,
+            cv_name,
         )
         logger.debug("Full recipient list: %s", receivers)
 
@@ -213,9 +211,10 @@ def setup_argparse() -> argparse.ArgumentParser:
     )
     group.add_argument(
         "-f",
-        "--emails-file",
+        "--emails-files",
         type=str,
-        help="Path to the file containing email addresses",
+        nargs="+",
+        help="Path to the file(s) containing email addresses",
     )
 
     parser.add_argument(
@@ -296,12 +295,12 @@ def parse_toml(toml_path: Path) -> dict[str, Any]:
     return data
 
 
-def load_emails_from_file(file_path: Path) -> list[str]:
+def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
     """
-    Load email addresses from a file.
+    Load email addresses from one or more files.
 
     Args:
-        file_path (Path): Path to the file containing email addresses.
+        file_paths (Iterable[Path]): Iterable of paths containing email addresses.
 
     Returns:
         list[str]: List of email addresses.
@@ -311,29 +310,56 @@ def load_emails_from_file(file_path: Path) -> list[str]:
         OSError: If the file cannot be read.
 
     """
-    if not file_path.exists():
-        msg = f"Emails file not found at {file_path}"
-        logger.error(msg)
-        raise FileNotFoundError(msg)
-
     email_pattern = re.compile(
         r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)"
     )
 
     try:
-        with file_path.open("r", encoding="utf-8") as fp:
-            emails = [
-                email
-                for line in fp
-                if len(email := line.strip()) > 0
-                and email_pattern.match(email)
-            ]
-            logger.debug(
-                "Successfully loaded %d email addresses from file", len(emails)
+        valid_emails: list[str] = []
+
+        total_invalid_email_line_count = 0
+        for path in file_paths:
+            # Existence check for each file.
+            if not path.exists():
+                msg = f"Email file not found at {path}"
+                logger.error(msg)
+                raise FileNotFoundError(msg)
+            logger.debug("Email file found at %s", path)
+
+            invalid_email_line_count_for_current_file = 0
+            with path.open("r", encoding="utf-8") as fp:
+                for line_num, line in enumerate(fp, start=1):
+                    email = line.strip()
+                    if len(email) > 0 and email_pattern.match(email):
+                        valid_emails.append(email)
+                    elif len(email) > 0:
+                        invalid_email_line_count_for_current_file += 1
+                        total_invalid_email_line_count += 1
+                        logger.warning(
+                            "Invalid email in %s at line %d: %s",
+                            path,
+                            line_num,
+                            email,
+                        )
+            if invalid_email_line_count_for_current_file > 0:
+                logger.warning(
+                    "Found %d invalid email line(s) in %s",
+                    invalid_email_line_count_for_current_file,
+                    path,
+                )
+        logger.debug(
+            "Successfully loaded %d email addresses from files",
+            len(valid_emails),
+        )
+        if total_invalid_email_line_count > 0:
+            logger.warning(
+                "Total invalid email line(s) skipped across files: %d",
+                total_invalid_email_line_count,
             )
-            return emails
+        return valid_emails
+
     except (OSError, PermissionError) as exc:
-        msg = f"Failed to read emails file: {exc}"
+        msg = f"Failed to read email file: {exc}"
         logger.exception(msg)
         raise OSError(msg) from exc
 
@@ -456,8 +482,8 @@ def send_emails(
         RuntimeError: If sending an email fails after the maximum number of attempts
 
     """
-    # Take wait times into account, 1.5 is margin for safety.
-    timeout = 1.5 * SMTP_TIMEOUT + len(emails) * WAIT_TIMES[1]
+    # Take wait times into account, its margin for safety.
+    timeout = 2 * SMTP_TIMEOUT + len(emails) * WAIT_TIMES[1]
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=timeout) as smtp:
         logger.debug("Established connection to SMTP server")
