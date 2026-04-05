@@ -28,16 +28,16 @@ load_dotenv(script_dir / ".env")
 # Credentials.
 def require_env(name: str) -> str:
     """
-    Retrieve the value of an environment variable, ensuring it is set and not empty.
+    Return an environment variable value if it exists and is not empty.
 
     Args:
-        name (str): The name of the environment variable to retrieve.
+        name (str): Name of the environment variable.
 
     Returns:
-        str: The value of the environment variable.
+        str: The environment variable value.
 
     Raises:
-        OSError: If the environment variable is not set or is empty.
+        OSError: Raised when the variable is missing or empty.
     """
     value = os.getenv(name)
     if value is None or value.strip() == "":
@@ -183,14 +183,14 @@ def main() -> None:
 
 def setup_argparse() -> argparse.ArgumentParser:
     """
-    Set up command-line argument parsing.
+    Build and return the command-line argument parser.
 
     Returns:
-        argparse.ArgumentParser: Configured argument parser.
+        argparse.ArgumentParser: A configured argument parser.
 
     """
     parser = argparse.ArgumentParser(
-        description="Email sender script that sends an email with a attachment.",
+        description="Send emails with an attachment.",
         epilog=textwrap.dedent("""
                 Environment variables required:
                     - SENDER: The sender's email address
@@ -236,13 +236,13 @@ def setup_argparse() -> argparse.ArgumentParser:
 
 def load_file(file_path: Path) -> tuple[str, bytes]:
     """
-    Load a file and return its content and name.
+    Read a file and return its name and contents.
 
     Args:
         file_path (Path): Path to the file.
 
     Returns:
-        tuple[str, bytes]: Tuple containing the name and its content.
+        tuple[str, bytes]: A tuple of file name and file bytes.
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -270,13 +270,13 @@ def load_file(file_path: Path) -> tuple[str, bytes]:
 
 def parse_toml(toml_path: Path) -> dict[str, Any]:
     """
-    Parse a TOML file and return its contents.
+    Parse a TOML file and return the resulting data.
 
     Args:
         toml_path (Path): Path to the TOML file.
 
     Returns:
-        dict[str, Any]: Dictionary containing the parsed TOML data.
+        dict[str, Any]: Dictionary with parsed TOML data.
 
     Raises:
         OSError: If the file cannot be read.
@@ -297,13 +297,15 @@ def parse_toml(toml_path: Path) -> dict[str, Any]:
 
 def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
     """
-    Load email addresses from one or more files.
+    Load email addresses from one or more files while validating their format.
+
+    Invalid addresses are skipped and logged with file name and line number.
 
     Args:
-        file_paths (Iterable[Path]): Iterable of paths containing email addresses.
+        file_paths (Iterable[Path]): Paths to files containing email addresses.
 
     Returns:
-        list[str]: List of email addresses.
+        list[str]: List of valid email addresses.
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -330,9 +332,12 @@ def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
             with path.open("r", encoding="utf-8") as fp:
                 for line_num, line in enumerate(fp, start=1):
                     email = line.strip()
-                    if len(email) > 0 and email_pattern.match(email):
+                    if len(email) == 0:
+                        continue  # Skip empty lines without logging.
+
+                    if email_pattern.match(email):
                         valid_emails.append(email)
-                    elif len(email) > 0:
+                    else:
                         invalid_email_line_count_for_current_file += 1
                         total_invalid_email_line_count += 1
                         logger.warning(
@@ -357,7 +362,6 @@ def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
                 total_invalid_email_line_count,
             )
         return valid_emails
-
     except (OSError, PermissionError) as exc:
         msg = f"Failed to read email file: {exc}"
         logger.exception(msg)
@@ -372,27 +376,30 @@ def create_emails(
     batch_size: int,
 ) -> list[EmailMessage]:
     """
-    Create email messages.
+    Build email messages from the sender, recipients, and config.
 
-    Builds email messages using the provided sender, recipients, subject, and message body.
-    Sets Reply-To and Date headers automatically.
+    Subject and message body are read from config. Reply-To and Date headers
+    are set automatically. Messages are plain text.
 
-    Each email is packed into BATCH_SIZE receivers to avoid hitting limits.
+    Recipients are grouped into batches of `batch_size` to help avoid provider
+    sending limits:
 
-    The emails are formatted as plain text.
+        - If `batch_size` == 1, the recipient is set in the To header.
+        - If `batch_size` > 1, recipients are set in Bcc and the sender is placed
+      in To to avoid a blank To header, which some filters reject.
 
     Args:
-        sender (str): The sender's email address
-        receivers (list[str]): List of recipient(s) email addresses
-        config (dict[str, Any]): Configuration dictionary containing subject and message
+        sender (str): Sender email address.
+        receivers (list[str]): Recipient email addresses.
+        config (dict[str, Any]): Configuration containing subject and message.
+        batch_size (int): Number of recipients per message.
 
     Returns:
-        list[EmailMessage]: A constructed list of EmailMessage objects
+        list[EmailMessage]: Constructed email messages.
 
     Raises:
-        ValueError: If the sender or receivers are not provided
-        TypeError: If the config does not contain the required keys
-
+        ValueError: If sender or receivers are missing.
+        TypeError: If required config keys are missing or invalid.
     """
 
     def build_single_email_message(
@@ -401,19 +408,19 @@ def create_emails(
         config: dict[str, Any],
     ) -> EmailMessage:
         """
-        Build a single email message.
+        Build and return one email message.
 
-        Sets the From, To, Bcc, Subject, and Reply-To headers.
-        Sets the Date header automatically.
+        The function sets standard headers (From, To, Bcc, Subject,
+        Reply-To, and Date) and fills the message body using values from
+        the provided configuration.
 
         Args:
-            sender (str): The sender's email address
-            receivers (Sequence[str]): Sequence of recipient(s) email addresses
-            config (dict[str, Any]): Configuration dictionary containing subject and message
+            sender (str): Sender email address.
+            receivers (Sequence[str]): One or more recipient email addresses.
+            config (dict[str, Any]): Configuration containing subject and message.
 
         Returns:
-            EmailMessage: A constructed EmailMessage object
-
+            EmailMessage: The constructed email message.
         """
         email = EmailMessage()
         email["From"] = sender
@@ -460,26 +467,23 @@ def send_emails(
     sender: str, password: str, emails: Sequence[EmailMessage]
 ) -> None:
     """
-    Send a sequence of emails using Gmail's SMTP server.
+    Send a sequence of emails through Gmail's SMTP server.
 
     Establishes a secure SSL connection to Gmail's SMTP server,
-    authenticates with the given credentials, and transmits the email message.
+    authenticates with the given credentials, and sends each message.
 
-    The reciever's email address is set in the EmailMessage object.
+    Recipient addresses are already set in each EmailMessage object.
 
     Args:
-        sender (str): The sender's email address
-        password (str): The password or app-specific password for the account
-        emails (Sequence[EmailMessage]): A sequence of EmailMessage objects to be sent
-
-    Returns:
-        None
+        sender (str): Sender email address.
+        password (str): Password or app-specific password for the account.
+        emails (Sequence[EmailMessage]): EmailMessage objects to send.
 
     Raises:
-        smtplib.SMTPAuthenticationError: If authentication fails
-        smtplib.SMTPException: If any SMTP-related error occurs during sending
-        TimeoutError: If the connection or operations time out
-        RuntimeError: If sending an email fails after the maximum number of attempts
+        smtplib.SMTPAuthenticationError: If authentication fails.
+        smtplib.SMTPException: If an SMTP-related error occurs while sending.
+        TimeoutError: If the connection or operations time out.
+        RuntimeError: If an email fails after the maximum number of attempts.
 
     """
     # Take wait times into account, its margin for safety.
@@ -490,7 +494,7 @@ def send_emails(
         smtp.login(sender, password)
         logger.debug("Successfully logged in to SMTP server")
 
-        for i, email in enumerate(emails, 1):
+        for i, email in enumerate(emails, start=1):
             for attempt in range(1, ATTEMPT_LIMIT + 1):
                 try:
                     smtp.send_message(email)
