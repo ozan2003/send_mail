@@ -191,12 +191,12 @@ def setup_argparse() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         description="Send emails with an attachment.",
-        epilog=textwrap.dedent("""
+        epilog=textwrap.dedent(f"""
                 Environment variables required:
                     - SENDER: The sender's email address
                     - PASSWORD: The password or app-specific password for the account
-                    - CV_FILE_PATH: Path to the file to be attached
-                    - CONFIG_FILE_PATH: Path to the configuration file
+                    - CV_FILE_PATH: Path to the file to be attached ({CV_FILE_PATH})
+                    - CONFIG_FILE_PATH: Path to the configuration file ({CONFIG_FILE_PATH})
                 """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
