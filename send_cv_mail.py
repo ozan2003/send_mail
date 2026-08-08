@@ -68,7 +68,7 @@ else:
 DEFAULT_SENT_LOG_PATH = script_dir / "sent_emails.log"
 
 # Mail sending parameters.
-SMTP_TIMEOUT = 30.0  # Timeout for the SMTP connection.
+SMTP_TIMEOUT = 30.0  # Per-operation socket timeout for the SMTP connection.
 # Range of wait times between sending emails (in seconds).
 WAIT_TIMES = (3.0, 9.0)
 ATTEMPT_LIMIT = 5  # Number of attempts to send an email.
@@ -208,7 +208,7 @@ def main() -> None:
     # Send emails.
     password = require_env("PASSWORD")
     try:
-        send_emails(
+        sent_count = send_emails(
             SENDER,
             password,
             emails,
@@ -229,7 +229,8 @@ def main() -> None:
         raise
     else:
         logger.info(
-            "Sent %d email(s) with attachment %s",
+            "Sent %d of %d email(s) with attachment %s",
+            sent_count,
             len(emails),
             cv_name,
         )
@@ -491,7 +492,9 @@ def load_sent_log(sent_log_path: Path) -> set[str]:
         return set()
 
     with sent_log_path.open("r", encoding="utf-8") as fp:
-        return {(stripped.lower()) for line in fp if (stripped := line.strip())}
+        return {
+            (stripped.lower()) for line in fp if (stripped := line.strip())
+        }
 
 
 def filter_unsent(
@@ -515,9 +518,7 @@ def filter_unsent(
     return remaining, len(receivers) - len(remaining)
 
 
-def append_to_sent_log(
-    sent_log_path: Path, recipients: Sequence[str]
-) -> None:
+def append_to_sent_log(sent_log_path: Path, recipients: Sequence[str]) -> None:
     """
     Append recipient addresses to the sent log file.
 
@@ -551,22 +552,17 @@ def recipients_of(
     Returns:
         list[str]: Recipient addresses, with surrounding whitespace removed.
     """
+    normalized_exclude = (
+        exclude.strip().lower() if exclude is not None else None
+    )
+
     addresses: list[str] = []
     for header in ("To", "Bcc"):
         for value in email.get_all(header, []):
-            addresses.extend(
-                stripped
-                for part in str(value).split(",")
-                if (stripped := part.strip())
-            )
-
-    if exclude is not None:
-        normalized_exclude = exclude.strip().lower()
-        addresses = [
-            address
-            for address in addresses
-            if address.strip().lower() != normalized_exclude
-        ]
+            for part in str(value).split(","):
+                stripped = part.strip()
+                if stripped and stripped.lower() != normalized_exclude:
+                    addresses.append(stripped)
 
     return addresses
 
@@ -666,18 +662,124 @@ def create_emails(
     return emails
 
 
+def _open_smtp_connection(sender: str, password: str) -> smtplib.SMTP_SSL:
+    """
+    Open an authenticated SMTP connection, retrying transient failures.
+
+    The connection attempt is retried up to ATTEMPT_LIMIT times with
+    exponential backoff when the server is temporarily unavailable.
+    Authentication failures are not retried.
+
+    Args:
+        sender (str): Sender email address.
+        password (str): Password or app-specific password for the account.
+
+    Returns:
+        smtplib.SMTP_SSL: An authenticated SMTP connection.
+
+    Raises:
+        smtplib.SMTPAuthenticationError: If the credentials are rejected.
+        OSError: If the connection could not be established.
+    """
+    last_exc: Exception | None = None
+
+    for attempt in range(1, ATTEMPT_LIMIT + 1):
+        smtp: smtplib.SMTP_SSL | None = None
+        try:
+            smtp = smtplib.SMTP_SSL(
+                "smtp.gmail.com", 465, timeout=SMTP_TIMEOUT
+            )
+            smtp.login(sender, password)
+            return smtp
+        except (smtplib.SMTPException, OSError) as exc:
+            if smtp is not None:
+                smtp.close()
+            if isinstance(exc, smtplib.SMTPAuthenticationError):
+                raise
+            last_exc = exc
+            if attempt == ATTEMPT_LIMIT:
+                break
+            logger.warning(
+                "Transient error connecting to SMTP server "
+                "(attempt %d/%d): %s",
+                attempt,
+                ATTEMPT_LIMIT,
+                exc,
+            )
+            sleep(2**attempt + uniform(0, 1))  # noqa: S311
+
+    if last_exc is not None:
+        raise last_exc
+    msg = "SMTP connection failed"
+    raise OSError(msg)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """
+    Return True if a send error may succeed when retried.
+
+    Server responses 421, 450, 451 and 452 mean the server is temporarily
+    unable to handle the message. Transport errors (timeouts, resets,
+    dropped connections) are also transient.
+
+    Args:
+        exc (Exception): The exception raised while sending.
+
+    Returns:
+        bool: True if the error is transient.
+    """
+    if isinstance(exc, smtplib.SMTPResponseException):
+        return exc.smtp_code in (421, 450, 451, 452)
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return True
+    # SMTPException subclasses OSError on Python >= 3.12.4, so this
+    # fallback must come after the SMTP-specific checks: what remains
+    # here is pure transport errors (timeouts, resets, refused conns).
+    return isinstance(exc, OSError)
+
+
+def _requires_reconnect(exc: Exception) -> bool:
+    """
+    Return True if a transient error left the connection unusable.
+
+    Response code 421 means the server is closing the transmission channel,
+    so the connection must be re-established. SMTPServerDisconnected and
+    pure transport errors (timeouts, resets) also require a fresh
+    connection. Codes 450, 451 and 452 keep the connection usable.
+
+    Args:
+        exc (Exception): The transient exception raised while sending.
+
+    Returns:
+        bool: True if the connection must be re-established.
+    """
+    if getattr(exc, "smtp_code", None) == 421:
+        return True
+    if isinstance(exc, smtplib.SMTPServerDisconnected):
+        return True
+    return isinstance(exc, OSError) and not isinstance(
+        exc, smtplib.SMTPException
+    )
+
+
 def send_emails(
     sender: str,
     password: str,
     emails: Sequence[EmailMessage],
     *,
     on_sent: Callable[[Sequence[str]], None] | None = None,
-) -> None:
+) -> int:
     """
     Send a sequence of emails through Gmail's SMTP server.
 
     Establishes a secure SSL connection to Gmail's SMTP server,
     authenticates with the given credentials, and sends each message.
+
+    Transient failures (temporary server responses, timeouts, resets) are
+    retried with backoff, reconnecting when the connection is lost. A
+    permanently rejected message is skipped and the run continues, all
+    failures are logged at the end. Only recipients the server accepted are
+    passed to `on_sent`.
 
     Recipient addresses are already set in each EmailMessage object.
 
@@ -686,57 +788,101 @@ def send_emails(
         password (str): Password or app-specific password for the account.
         emails (Sequence[EmailMessage]): EmailMessage objects to send.
         on_sent (Callable[[Sequence[str]], None] | None): Callback invoked
-            with each sent email's recipient addresses right after a
-            successful send, e.g. to record them in a sent log.
+            with each sent email's accepted recipient addresses right after
+            a successful send, e.g. to record them in a sent log.
+
+    Returns:
+        int: The number of messages sent successfully.
 
     Raises:
         smtplib.SMTPAuthenticationError: If authentication fails.
-        smtplib.SMTPException: If an SMTP-related error occurs while sending.
-        TimeoutError: If the connection or operations time out.
-        RuntimeError: If an email fails after the maximum number of attempts.
-
+        OSError: If the SMTP connection cannot be established.
     """
-    # Take wait times into account, its margin for safety.
-    timeout = 2 * SMTP_TIMEOUT + len(emails) * WAIT_TIMES[1]
+    smtp = _open_smtp_connection(sender, password)
+    sent_messages = 0
+    failures: list[tuple[list[str], str]] = []
 
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=timeout) as smtp:
-        logger.debug("Established connection to SMTP server")
-        smtp.login(sender, password)
-        logger.debug("Successfully logged in to SMTP server")
-
+    try:
         for i, email in enumerate(emails, start=1):
+            is_sent = False
             for attempt in range(1, ATTEMPT_LIMIT + 1):
                 try:
-                    smtp.send_message(email)
+                    # sendmail returns {refused_addr: (code, error)} for
+                    # recipients the server rejected while delivering to
+                    # the resti it raises if every recipient is refused.
+                    refused = smtp.send_message(email)
+                    is_sent = True
+                    sent_messages += 1
+
+                    # Log only the recipients the server accepted.
+                    sent_recipients = recipients_of(email, exclude=sender)
+                    if refused:
+                        refused_set = {
+                            address.strip().lower() for address in refused
+                        }
+                        sent_recipients = [
+                            recipient
+                            for recipient in sent_recipients
+                            if recipient.strip().lower() not in refused_set
+                        ]
+                        for address, reason in refused.items():
+                            failures.append(([address], str(reason)))
 
                     # Record this email's recipients right away, so a crash
                     # later in the run does not resend to them next time.
-                    sent_recipients = recipients_of(email, exclude=sender)
                     if sent_recipients and on_sent is not None:
                         on_sent(sent_recipients)
 
-                    logger.debug("Sent email %d/%d", i, len(emails))
-                    if i < len(emails):
-                        wait_time = uniform(*WAIT_TIMES)  # noqa: S311
-                        logger.debug(
-                            "Waiting for %.2f seconds before sending next email",
-                            wait_time,
+                    break
+                except (smtplib.SMTPException, OSError) as exc:
+                    recipients = recipients_of(email, exclude=sender)
+                    if not _is_transient_error(exc):
+                        # Permanent rejection: skip this batch and continue.
+                        failures.append((recipients, str(exc)))
+                        break
+                    if attempt == ATTEMPT_LIMIT:
+                        failures.append(
+                            (
+                                recipients,
+                                f"failed after {ATTEMPT_LIMIT} attempts: {exc}",
+                            )
                         )
-                        sleep(wait_time)
-                    break  # success, exit the retry loop
-                except smtplib.SMTPException as exc:
-                    if getattr(exc, "smtp_code", None) not in (
-                        421,
-                        450,
-                        451,
-                        452,
-                    ):
-                        raise
+                        break
+                    logger.warning(
+                        "Transient SMTP error for email %d/%d "
+                        "(attempt %d/%d): %s",
+                        i,
+                        len(emails),
+                        attempt,
+                        ATTEMPT_LIMIT,
+                        exc,
+                    )
                     sleep(2**attempt + uniform(0, 1))  # noqa: S311
-                    continue  # retry
-            else:
-                msg = f"Failed to send email to {email['To']} after {ATTEMPT_LIMIT} attempts"
-                raise RuntimeError(msg)
+                    if _requires_reconnect(exc):
+                        # The connection is gone or closing; retry fresh.
+                        smtp.close()
+                        smtp = _open_smtp_connection(sender, password)
+
+            if is_sent and i < len(emails):
+                wait_time = uniform(*WAIT_TIMES)  # noqa: S311
+                logger.debug(
+                    "Waiting for %.2f seconds before sending next email",
+                    wait_time,
+                )
+                sleep(wait_time)
+    finally:
+        smtp.close()
+
+    if failures:
+        logger.error(
+            "%d of %d email(s) failed to send", len(failures), len(emails)
+        )
+        for recipients, reason in failures:
+            logger.error(
+                "Failed to send to %s: %s", ", ".join(recipients), reason
+            )
+
+    return sent_messages
 
 
 if __name__ == "__main__":
