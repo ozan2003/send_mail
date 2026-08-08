@@ -7,7 +7,7 @@ import os
 import re
 import smtplib
 import textwrap
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from email.message import EmailMessage
 from email.utils import localtime, make_msgid
 from logging import getLevelName
@@ -47,7 +47,8 @@ def require_env(name: str) -> str:
 
 
 SENDER = require_env("SENDER")
-PASSWORD = require_env("PASSWORD")
+# Password is only needed for an actual send, --dry-run must work without it.
+PASSWORD = os.getenv("PASSWORD")
 
 # Config paths.
 if (cv_path := os.getenv("CV_FILE_PATH")) is not None:
@@ -61,6 +62,10 @@ if (config_path := os.getenv("CONFIG_FILE_PATH")) is not None:
 else:
     msg = "CONFIG_FILE_PATH environment variable not set"
     raise OSError(msg)
+
+# Default location for the sent log, which records recipients that were sent
+# successfully so a later run can skip them.
+DEFAULT_SENT_LOG_PATH = script_dir / "sent_emails.log"
 
 # Mail sending parameters.
 SMTP_TIMEOUT = 30.0  # Timeout for the SMTP connection.
@@ -129,6 +134,30 @@ def main() -> None:
         logger.error(msg)
         raise ValueError(msg)
 
+    # Remove duplicate addresses before building or sending anything.
+    receivers, duplicate_count = deduplicate_emails(receivers)
+    if duplicate_count > 0:
+        logger.warning(
+            "Removed %d duplicate email address(es)", duplicate_count
+        )
+
+    # Drop recipients already recorded as sent, so a re-run resumes instead
+    # of emailing anyone twice.
+    sent_log_path = Path(args.sent_log).expanduser()
+    sent_recipients = load_sent_log(sent_log_path)
+    if sent_recipients:
+        receivers, skipped_count = filter_unsent(receivers, sent_recipients)
+        if skipped_count > 0:
+            logger.info(
+                "Skipping %d recipient(s) already in sent log %s",
+                skipped_count,
+                sent_log_path,
+            )
+
+    if not receivers:
+        logger.info("No unsent recipients left, nothing to do.")
+        return
+
     # Create emails.
     emails = create_emails(
         SENDER,
@@ -156,9 +185,35 @@ def main() -> None:
             filename=cv_name,
         )
 
+    # Preview mode: print the messages without connecting to an SMTP server
+    # or touching the sent log.
+    if args.dry_run:
+        print(
+            f"[DRY RUN] Would send {len(emails)} email(s) to "
+            f"{len(receivers)} recipient(s)"
+        )
+        print(
+            f"[DRY RUN] Attachment: {cv_name} "
+            f"({len(cv_data)} bytes, {maintype}/{subtype})"
+        )
+        for i, email in enumerate(emails, start=1):
+            bcc = email.get("Bcc", "")
+            print(
+                f"[DRY RUN] Message {i}: To={email['To']} | "
+                f"Bcc={bcc if bcc else '-'} | Subject={email['Subject']} | "
+                f"Recipients={len(recipients_of(email, exclude=SENDER))}"
+            )
+        return
+
     # Send emails.
+    password = require_env("PASSWORD")
     try:
-        send_emails(SENDER, PASSWORD, emails)
+        send_emails(
+            SENDER,
+            password,
+            emails,
+            on_sent=lambda sent: append_to_sent_log(sent_log_path, sent),
+        )
     except smtplib.SMTPResponseException as resp_exc:
         logger.exception(
             "SMTP Error: %s - %s",
@@ -194,9 +249,14 @@ def setup_argparse() -> argparse.ArgumentParser:
         epilog=textwrap.dedent(f"""
                 Environment variables required:
                     - SENDER: The sender's email address
-                    - PASSWORD: The password or app-specific password for the account
+                    - PASSWORD: The password or app-specific password for the account (not needed with --dry-run)
                     - CV_FILE_PATH: Path to the file to be attached ({CV_FILE_PATH})
                     - CONFIG_FILE_PATH: Path to the configuration file ({CONFIG_FILE_PATH})
+
+                Sent log:
+                    Recipients are recorded after each successful send in the file
+                    given by --sent-log (default: {DEFAULT_SENT_LOG_PATH}).
+                    Recipients already in the log are skipped on the next run.
                 """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -223,6 +283,19 @@ def setup_argparse() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Number of emails to send in a single batch",
+    )
+    parser.add_argument(
+        "-n",
+        "--dry-run",
+        action="store_true",
+        help="Build and preview the emails without sending them",
+    )
+    parser.add_argument(
+        "--sent-log",
+        type=str,
+        default=str(DEFAULT_SENT_LOG_PATH),
+        help="File that records sent recipients; recipients already in it are "
+        "skipped on the next run (default: %(default)s)",
     )
     parser.add_argument(
         "-log",
@@ -368,6 +441,136 @@ def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
         raise OSError(msg) from exc
 
 
+def deduplicate_emails(emails: Sequence[str]) -> tuple[list[str], int]:
+    """
+    Remove duplicate addresses while keeping the original order.
+
+    Addresses are compared after stripping whitespace and lowercasing, so
+    "A@X.com" and "a@x.com" count as the same recipient. Blank addresses are
+    dropped without being counted.
+
+    Args:
+        emails (Sequence[str]): Addresses to deduplicate.
+
+    Returns:
+        tuple[list[str], int]: Unique, stripped addresses and the number of
+            duplicates removed.
+    """
+    seen_mails: set[str] = set()
+    unique_emails: list[str] = []
+    duplicate_mail_n = 0
+
+    for email in emails:
+        stripped = email.strip()
+        if not stripped:
+            continue
+        if stripped.lower() in seen_mails:
+            duplicate_mail_n += 1
+            continue
+        seen_mails.add(stripped.lower())
+        unique_emails.append(stripped)
+
+    return unique_emails, duplicate_mail_n
+
+
+def load_sent_log(sent_log_path: Path) -> set[str]:
+    """
+    Return the addresses recorded in a sent log.
+
+    A missing file is treated as an empty log. Addresses are normalized by
+    stripping and lowercasing so lookups match `deduplicate_emails`.
+
+    Args:
+        sent_log_path (Path): Path to the sent log file.
+
+    Returns:
+        set[str]: Normalized addresses previously recorded as sent.
+    """
+    sent_log_path = Path(sent_log_path)
+    if not sent_log_path.exists():
+        return set()
+
+    with sent_log_path.open("r", encoding="utf-8") as fp:
+        return {(stripped.lower()) for line in fp if (stripped := line.strip())}
+
+
+def filter_unsent(
+    receivers: Sequence[str], sent_mails: set[str]
+) -> tuple[list[str], int]:
+    """
+    Split receivers into those not yet sent and those already in the log.
+
+    Args:
+        receivers (Sequence[str]): Recipient addresses to filter.
+        sent_mails (set[str]): Normalized addresses already recorded as sent.
+
+    Returns:
+        tuple[list[str], int]: Remaining receivers and the number skipped.
+    """
+    remaining = [
+        receiver
+        for receiver in receivers
+        if receiver.strip().lower() not in sent_mails
+    ]
+    return remaining, len(receivers) - len(remaining)
+
+
+def append_to_sent_log(
+    sent_log_path: Path, recipients: Sequence[str]
+) -> None:
+    """
+    Append recipient addresses to the sent log file.
+
+    Each call opens the file in append mode and writes one address per line,
+    so a run interrupted mid-way keeps every send that already succeeded.
+
+    Args:
+        sent_log_path (Path): Path to the sent log file.
+        recipients (Sequence[str]): Addresses to record as sent.
+    """
+    sent_log_path = Path(sent_log_path)
+    with sent_log_path.open("a", encoding="utf-8") as fp:
+        for recipient in recipients:
+            fp.write(f"{recipient.strip()}\n")
+
+
+def recipients_of(
+    email: EmailMessage, *, exclude: str | None = None
+) -> list[str]:
+    """
+    Return the recipient addresses in an email's To and Bcc headers.
+
+    Used for dry-run previews and for recording which recipients a sent
+    message actually covered.
+
+    Args:
+        email (EmailMessage): The email message to inspect.
+        exclude (str | None): Address to ignore, e.g. the sender used to
+            fill a To header that would otherwise be blank.
+
+    Returns:
+        list[str]: Recipient addresses, with surrounding whitespace removed.
+    """
+    addresses: list[str] = []
+    for header in ("To", "Bcc"):
+        for value in email.get_all(header, []):
+            addresses.extend(
+                stripped
+                for part in str(value).split(",")
+                if (stripped := part.strip())
+            )
+
+    if exclude is not None:
+        normalized_exclude = exclude.strip().lower()
+        addresses = [
+            address
+            for address in addresses
+            if address.strip().lower() != normalized_exclude
+        ]
+
+    return addresses
+
+
 def create_emails(
     sender: str,
     receivers: list[str],
@@ -464,7 +667,11 @@ def create_emails(
 
 
 def send_emails(
-    sender: str, password: str, emails: Sequence[EmailMessage]
+    sender: str,
+    password: str,
+    emails: Sequence[EmailMessage],
+    *,
+    on_sent: Callable[[Sequence[str]], None] | None = None,
 ) -> None:
     """
     Send a sequence of emails through Gmail's SMTP server.
@@ -478,6 +685,9 @@ def send_emails(
         sender (str): Sender email address.
         password (str): Password or app-specific password for the account.
         emails (Sequence[EmailMessage]): EmailMessage objects to send.
+        on_sent (Callable[[Sequence[str]], None] | None): Callback invoked
+            with each sent email's recipient addresses right after a
+            successful send, e.g. to record them in a sent log.
 
     Raises:
         smtplib.SMTPAuthenticationError: If authentication fails.
@@ -498,6 +708,12 @@ def send_emails(
             for attempt in range(1, ATTEMPT_LIMIT + 1):
                 try:
                     smtp.send_message(email)
+
+                    # Record this email's recipients right away, so a crash
+                    # later in the run does not resend to them next time.
+                    sent_recipients = recipients_of(email, exclude=sender)
+                    if sent_recipients and on_sent is not None:
+                        on_sent(sent_recipients)
 
                     logger.debug("Sent email %d/%d", i, len(emails))
                     if i < len(emails):

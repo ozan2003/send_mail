@@ -14,3 +14,7 @@ If you want to use this script as is, you will need to configure the following:
 - The CV file path. (`CV_FILE_PATH`)
 
 Refer to `-h/--help` for usage.
+
+Run with `--dry-run` to preview the emails without sending. Sent recipients
+are recorded in `sent_emails.log` (override with `--sent-log`) and skipped
+on the next run.
