@@ -1,0 +1,77 @@
+[project]
+name = "send-mail"
+version = "0.1.0"
+description = "Script to send CV emails"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.ruff]
+line-length = 79
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "EM",
+    "W",
+    "F",
+    "I",
+    "N",
+    "UP",
+    "B",
+    "A",
+    "YTT",
+    "ASYNC",
+    "S",
+    "BLE",
+    "C4",
+    "PIE",
+    "SIM",
+    "RET",
+    "ARG",
+    "PTH",
+    "ERA",
+    "PL",
+    "RUF",
+    "PT",
+    "ANN",
+    "D101",
+    "D102",
+    "D103",
+]
+ignore = [
+    "E501",
+    "ISC001",
+    "COM812",
+    "D203",
+    "D213",
+    "ANN101",
+    "ANN102",
+    "ANN201",
+    "ANN204",
+    "ERA001",
+    "PLR0913",
+    "PLR0912",
+    "PLR0915",
+    "PLR0911",
+    "PLR2004",
+    "PLW2901",
+    "PLC0414",
+    "RET504",
+    "ARG002",
+    "SIM108",
+    "A003",
+]
+
+[tool.pyrefly]
+preset = "strict"
+infer-with-first-use = false
+
+[tool.pyrefly.errors]
+deprecated = "ignore"
+bad-unpacking = "ignore"
+bad-specialization = "ignore"
+unknown-argument-type = "ignore"
+unknown-attribute-type = "ignore"
+bad-assignment = "ignore"
+bad-typed-dict-key = "ignore"

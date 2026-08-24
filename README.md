@@ -1,43 +1,87 @@
-# Send mail
+# send_cv_mail
 
-- This script sends email with the school account.
-- It reads the email subject and body from a TOML file.
-- It adds the CV as an attachment.
-- It sends the email to the specified recipient(s).
+A Python tool that sends application emails with a CV attachment through SMTP.
+
+## Features
+
+- Reads the email subject and body from a TOML configuration file.
+- Reads SMTP credentials from a separate TOML file.
+- Requires Python 3.13 or newer with no external packages.
+- Skips email addresses that you already contacted.
 
 ## Configuration
 
-If you want to use this script without changes, configure the following:
+The tool stores configuration files in `~/.config/send_cv/`.
+The script creates starter template files automatically on the first run.
 
-- Set the email address and password as environment variables (`SENDER` and `PASSWORD`).
-- `PASSWORD` is only needed for an actual send. `--dry-run` works without it.
-- Put the email subject and body in a TOML file. The script reads this file from `CONFIG_FILE_PATH`.
-- Set the CV file path in `CV_FILE_PATH`.
+### 1. `credentials.toml`
 
-Refer to `-h/--help` for usage.
+File location: `~/.config/send_cv/credentials.toml`
 
-Run with `--dry-run` to preview the emails without sending. The script records sent recipients in `sent_emails.log`.
-You can change this file with `--sent-log`. On the next run, the script skips recipients in this log.
+```toml
+[smtp]
+sender = "your.email@gmail.com"
+password = "your-app-password"
+host = "smtp.gmail.com"
+port = 465
+```
 
-## Configuration file
+If you use `--dry-run`, `password` is not necessary.
+`host` and `port` are optional.
 
-The file given by `CONFIG_FILE_PATH` must be a TOML file that has these keys:
+### 2. `config.toml`
 
-- `subject` (string, required): the email subject line.
-- `message` (string, required): the plain-text email body.
-
-Example:
+File location: `~/.config/send_cv/config.toml`
 
 ```toml
 subject = "Application for Summer Internship"
+attachment_path = "~/Documents/cv.pdf"
+
 message = """
 Dear Hiring Team,
 
-I am writing to apply for the summer internship position.
-My CV is attached.
+Please find attached my CV for your consideration.
 
-Best regards.
+Best regards,
 """
 ```
 
-Both keys are required. A missing key stops the run with a `KeyError`.
+`attachment_path` must be an absolute path or start with `~`.
+
+On Windows, use forward slashes or single quotes for the path:
+
+- Forward slashes: `attachment_path = "C:/Users/name/Documents/cv.pdf"`
+- Single quotes: `attachment_path = 'C:\Users\name\Documents\cv.pdf'`
+- User directory: `attachment_path = "~/Documents/cv.pdf"`
+
+## File Search Order
+
+The script searches for files in this order:
+
+1. Command-line options: `--config`, `--credentials`, `--cv`.
+2. Current working directory: `./config.toml`, `./credentials.toml`.
+3. User configuration directory: `~/.config/send_cv/`.
+
+## Usage
+
+Preview the email output without sending:
+
+```bash
+python send_cv_mail.py -e recruiter@example.com --dry-run
+```
+
+Send emails to a list from a file in batches of 3:
+
+```bash
+python send_cv_mail.py -f emails.txt -b 3
+```
+
+Specify custom file paths:
+
+```bash
+python send_cv_mail.py -e recruiter@example.com --config ./custom_config.toml --cv ~/Downloads/new_cv.pdf
+```
+
+The tool writes sent addresses to `sent_emails.log`.
+To change this file path, use the `--sent-log` option.
+On the next run, the tool skips addresses that exist in this log.
