@@ -63,15 +63,10 @@ ignore = [
     "A003",
 ]
 
-[tool.pyrefly]
-preset = "strict"
-infer-with-first-use = false
-
-[tool.pyrefly.errors]
-deprecated = "ignore"
-bad-unpacking = "ignore"
-bad-specialization = "ignore"
-unknown-argument-type = "ignore"
-unknown-attribute-type = "ignore"
-bad-assignment = "ignore"
-bad-typed-dict-key = "ignore"
+[tool.pyright]
+typeCheckingMode = "strict"
+reportDeprecated = "none"
+reportInvalidTypeArguments = "none"
+reportUnknownArgumentType = "none"
+reportUnknownMemberType = "none"
+reportAssignmentType = "none"

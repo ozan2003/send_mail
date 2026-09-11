@@ -15,7 +15,7 @@ from pathlib import Path
 from random import uniform
 from sys import version_info
 from time import sleep
-from typing import Any, NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict, cast
 
 # Default config directory in user profile / home directory.
 DEFAULT_CONFIG_DIR = Path.home() / ".config" / "send_cv"
@@ -200,20 +200,16 @@ def load_credentials(
 
     data = parse_toml(credentials_path)
 
-    smtp_data = data.get("smtp")
-    if not isinstance(smtp_data, dict):
+    if not isinstance(raw_smtp := data.get("smtp"), dict):
         msg = (
             f"Credentials file {credentials_path} must contain an [smtp] table"
         )
         raise ValueError(msg)
 
+    smtp_data = cast(SmtpConfig, raw_smtp)
+
     sender = smtp_data.get("sender")
-    if (
-        not sender
-        or not isinstance(sender, str)
-        or sender.strip() == ""
-        or sender == "your.email@gmail.com"
-    ):
+    if not sender or sender.strip() == "" or sender == "your.email@gmail.com":
         msg = (
             f"Valid sender email address must be configured in {credentials_path} "
             "under [smtp.sender]"
@@ -223,7 +219,6 @@ def load_credentials(
     password = smtp_data.get("password", "")
     if require_password and (
         not password
-        or not isinstance(password, str)
         or password.strip() == ""
         or password == "your-app-password"  # noqa: S105
     ):
@@ -234,7 +229,7 @@ def load_credentials(
         raise ValueError(msg)
 
     host = smtp_data.get("host", DEFAULT_SMTP_HOST)
-    if not isinstance(host, str) or not host.strip():
+    if not host.strip():
         host = DEFAULT_SMTP_HOST
 
     port_raw = smtp_data.get("port", DEFAULT_SMTP_PORT)
@@ -244,7 +239,7 @@ def load_credentials(
         msg = f"Invalid SMTP port '{port_raw}' in {credentials_path}"
         raise ValueError(msg) from exc
 
-    return sender.strip(), str(password).strip(), host.strip(), port
+    return sender.strip(), password.strip(), host.strip(), port
 
 
 def resolve_cv_path(
@@ -269,11 +264,7 @@ def resolve_cv_path(
         cv_path = Path(explicit_cv).expanduser().resolve()
     else:
         attachment_raw = config.get("attachment_path")
-        if (
-            not attachment_raw
-            or not isinstance(attachment_raw, str)
-            or not attachment_raw.strip()
-        ):
+        if not attachment_raw or not attachment_raw.strip():
             msg = (
                 "No CV attachment path specified. Provide 'attachment_path' "
                 "in config.toml or pass --cv."
