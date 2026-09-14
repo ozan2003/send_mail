@@ -25,6 +25,7 @@ from typing import (
     NotRequired,
     TypedDict,
     cast,
+    override,
 )
 
 if TYPE_CHECKING:
@@ -32,8 +33,15 @@ if TYPE_CHECKING:
 
 # Default configuration directory in the user home directory.
 DEFAULT_CONFIG_DIR: Final = Path.home() / ".config" / "send_cv"
-DEFAULT_CONFIG_PATH: Final = DEFAULT_CONFIG_DIR / "config.toml"
-DEFAULT_CREDENTIALS_PATH: Final = DEFAULT_CONFIG_DIR / "credentials.toml"
+CONFIG_FILENAME: Final = "config.toml"
+CREDENTIALS_FILENAME: Final = "credentials.toml"
+DEFAULT_CONFIG_PATH: Final = DEFAULT_CONFIG_DIR / CONFIG_FILENAME
+DEFAULT_CREDENTIALS_PATH: Final = DEFAULT_CONFIG_DIR / CREDENTIALS_FILENAME
+
+# Defaults of the command-line options.
+DEFAULT_BATCH_SIZE: Final = 3
+DEFAULT_LOG_LEVEL: Final = "info"
+LOG_LEVELS: Final = ("debug", "info", "warning", "error", "critical")
 
 # SMTP credential types.
 Sender = NewType("Sender", str)
@@ -115,12 +123,12 @@ def ensure_config_scaffold(config_dir: Path) -> None:
     """
     config_dir.mkdir(parents=True, exist_ok=True)
 
-    credentials_file = config_dir / "credentials.toml"
+    credentials_file = config_dir / CREDENTIALS_FILENAME
     if not credentials_file.exists():
         credentials_file.write_text(CREDENTIALS_TEMPLATE, encoding="utf-8")
         logger.info("Created the credentials file at %s", credentials_file)
 
-    config_file = config_dir / "config.toml"
+    config_file = config_dir / CONFIG_FILENAME
     if not config_file.exists():
         config_file.write_text(CONFIG_TEMPLATE, encoding="utf-8")
         logger.info("Created the configuration file at %s", config_file)
@@ -510,14 +518,14 @@ def main() -> None:
 
     # Read the configuration file.
     config_path = resolve_config_path(
-        args.config, "config.toml", DEFAULT_CONFIG_PATH
+        args.config, CONFIG_FILENAME, DEFAULT_CONFIG_PATH
     )
     logger.debug("Configuration file: %s", config_path)
     config = load_config(config_path)
 
     # Read the credentials.
     credentials_path = resolve_config_path(
-        args.credentials, "credentials.toml", DEFAULT_CREDENTIALS_PATH
+        args.credentials, CREDENTIALS_FILENAME, DEFAULT_CREDENTIALS_PATH
     )
     logger.debug("Credentials file: %s", credentials_path)
     sender, password, host, port = load_credentials(
@@ -564,31 +572,71 @@ def main() -> None:
     logger.debug("All recipients: %s", receivers)
 
 
+def path_option_help(
+    description: str, filename: str, default_path: Path
+) -> str:
+    """Return the help text of an option that accepts a file path.
+
+    The text describes the search order of resolve_config_path, which an
+    argparse default cannot express.
+
+    Args:
+        description (str): Description of the option.
+        filename (str): Name of the file in the current directory.
+        default_path (Path): Path to use if the current directory has no
+            such file.
+
+    Returns:
+        str: Help text for the option.
+    """
+    return f"{description} (default: ./{filename} or {default_path})"
+
+
 def parse_args() -> argparse.Namespace:
     """Build the command-line parser and return the parsed arguments.
 
     Returns:
         argparse.Namespace: The options and arguments from the command line.
     """
+
+    class Formatter(argparse.RawDescriptionHelpFormatter):
+        """Keep the raw layout and add the default of each option.
+
+        ArgumentDefaultsHelpFormatter adds the default of every argument,
+        including the ones that carry no information, for example None and
+        False. This formatter adds only a default that tells the user
+        something.
+        """
+
+        @override
+        def _get_help_string(self, action: argparse.Action) -> str:
+            """Return the help text of an argument."""
+            help_text = action.help or ""
+            default = action.default
+            if (
+                default is None
+                or default is argparse.SUPPRESS
+                or isinstance(default, bool)
+            ):
+                return help_text
+            return f"{help_text} (default: %(default)s)"
+
     parser = argparse.ArgumentParser(
         description="Send application emails with a CV attached.",
-        epilog=textwrap.dedent(f"""
+        epilog=textwrap.dedent("""
                 Configuration:
                     - The configuration file holds the subject, the message,
-                      and attachment_path (default: ./config.toml or
-                      {DEFAULT_CONFIG_PATH})
+                      and attachment_path.
                     - The credentials file holds [smtp] sender, password, host,
-                      and port (default: ./credentials.toml or
-                      {DEFAULT_CREDENTIALS_PATH})
+                      and port.
 
                 Sent log:
                     The script writes each recipient to the sent log after a
                     successful send.
-                    The log file is --sent-log (default:
-                    {DEFAULT_SENT_LOG_PATH}).
+                    The log file is the --sent-log option.
                     A later run skips the recipients in the log.
                 """),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        formatter_class=Formatter,
     )
 
     group = parser.add_mutually_exclusive_group(required=True)
@@ -610,26 +658,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=str,
-        help="Path to the configuration file (default: ./config.toml or "
-        f"{DEFAULT_CONFIG_PATH})",
+        help=path_option_help(
+            "Path to the configuration file",
+            CONFIG_FILENAME,
+            DEFAULT_CONFIG_PATH,
+        ),
     )
     parser.add_argument(
         "--credentials",
         type=str,
-        help="Path to the credentials file (default: ./credentials.toml or "
-        f"{DEFAULT_CREDENTIALS_PATH})",
+        help=path_option_help(
+            "Path to the credentials file",
+            CREDENTIALS_FILENAME,
+            DEFAULT_CREDENTIALS_PATH,
+        ),
     )
     parser.add_argument(
         "--cv",
         type=str,
         help="Path to the CV file to attach (overrides attachment_path in "
-        "config.toml)",
+        f"{CONFIG_FILENAME})",
     )
     parser.add_argument(
         "-b",
         "--batch-size",
         type=int,
-        default=3,
+        default=DEFAULT_BATCH_SIZE,
         help="Number of emails in each batch",
     )
     parser.add_argument(
@@ -643,14 +697,14 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=str(DEFAULT_SENT_LOG_PATH),
         help="File that records the recipients of each email. A later run "
-        "skips the recipients in this file (default: %(default)s)",
+        "skips the recipients in this file",
     )
     parser.add_argument(
         "-l",
         "-log",
         "--loglevel",
-        default="info",
-        choices=("debug", "info", "warning", "error", "critical"),
+        default=DEFAULT_LOG_LEVEL,
+        choices=LOG_LEVELS,
         help="Set the log level",
     )
     return parser.parse_args()
