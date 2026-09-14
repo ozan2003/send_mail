@@ -15,16 +15,22 @@ from logging import getLevelName
 from pathlib import Path
 from random import uniform
 from time import sleep
-from typing import Any, Final, NotRequired, TypedDict, cast
+from typing import Any, Final, NewType, NotRequired, TypedDict, cast
 
 # Default config directory in user profile / home directory.
 DEFAULT_CONFIG_DIR: Final = Path.home() / ".config" / "send_cv"
 DEFAULT_CONFIG_PATH: Final = DEFAULT_CONFIG_DIR / "config.toml"
 DEFAULT_CREDENTIALS_PATH: Final = DEFAULT_CONFIG_DIR / "credentials.toml"
 
+# SMTP credential types.
+Sender = NewType("Sender", str)
+Password = NewType("Password", str)
+Host = NewType("Host", str)
+Port = NewType("Port", int)
+
 # Default host and port for SMTP server.
-DEFAULT_SMTP_HOST: Final = "smtp.gmail.com"
-DEFAULT_SMTP_PORT: Final = 465
+DEFAULT_SMTP_HOST: Final = Host("smtp.gmail.com")
+DEFAULT_SMTP_PORT: Final = Port(465)
 
 # Default location for the sent log, which records recipients that were sent
 # successfully so a later run can skip them.
@@ -182,7 +188,7 @@ def load_credentials(
     credentials_path: Path,
     *,
     require_password: bool = True,
-) -> tuple[str, str, str, int]:
+) -> tuple[Sender, Password, Host, Port]:
     """
     Load and validate SMTP credentials from credentials.toml.
 
@@ -191,7 +197,8 @@ def load_credentials(
         require_password (bool): Whether to enforce a valid password (False for dry-run).
 
     Returns:
-        tuple[str, str, str, int]: Tuple of (sender, password, host, port).
+        tuple[Sender, Password, Host, Port]: Tuple of (sender, password,
+            host, port).
 
     Raises:
         FileNotFoundError: If the credentials file does not exist.
@@ -261,7 +268,7 @@ def load_credentials(
         )
         raise ValueError(msg)
 
-    return sender, password, host, port
+    return Sender(sender), Password(password), Host(host), Port(port)
 
 
 def resolve_cv_path(
@@ -830,7 +837,7 @@ def recipients_of(
 
 
 def create_emails(
-    sender: str,
+    sender: Sender,
     receivers: list[str],
     *,
     config: EmailConfig,
@@ -850,7 +857,7 @@ def create_emails(
       in To to avoid a blank To header, which some filters reject.
 
     Args:
-        sender (str): Sender email address.
+        sender (Sender): Sender email address.
         receivers (list[str]): Recipient email addresses.
         config (EmailConfig): Configuration containing subject and message.
         batch_size (int): Number of recipients per message.
@@ -864,7 +871,7 @@ def create_emails(
     """
 
     def build_single_email_message(
-        sender: str,
+        sender: Sender,
         receivers: Sequence[str],
         config: EmailConfig,
     ) -> EmailMessage:
@@ -876,7 +883,7 @@ def create_emails(
         the provided configuration.
 
         Args:
-            sender (str): Sender email address.
+            sender (Sender): Sender email address.
             receivers (Sequence[str]): One or more recipient email addresses.
             config (EmailConfig): Configuration containing subject and message.
 
@@ -924,10 +931,10 @@ def create_emails(
 
 
 def _open_smtp_connection(
-    sender: str,
-    password: str,
-    host: str = DEFAULT_SMTP_HOST,
-    port: int = DEFAULT_SMTP_PORT,
+    sender: Sender,
+    password: Password,
+    host: Host = DEFAULT_SMTP_HOST,
+    port: Port = DEFAULT_SMTP_PORT,
 ) -> smtplib.SMTP_SSL:
     """
     Open an authenticated SMTP connection, retrying transient failures.
@@ -937,10 +944,10 @@ def _open_smtp_connection(
     Authentication failures are not retried.
 
     Args:
-        sender (str): Sender email address.
-        password (str): Password or app-specific password for the account.
-        host (str): SMTP server hostname.
-        port (int): SMTP SSL port number.
+        sender (Sender): Sender email address.
+        password (Password): Password or app-specific password for the account.
+        host (Host): SMTP server hostname.
+        port (Port): SMTP SSL port number.
 
     Returns:
         smtplib.SMTP_SSL: An authenticated SMTP connection.
@@ -982,10 +989,10 @@ def _open_smtp_connection(
 
 def _reconnect(
     smtp: smtplib.SMTP_SSL,
-    sender: str,
-    password: str,
-    host: str,
-    port: int,
+    sender: Sender,
+    password: Password,
+    host: Host,
+    port: Port,
 ) -> smtplib.SMTP_SSL:
     """
     Close a connection and return a fresh authenticated replacement.
@@ -993,10 +1000,10 @@ def _reconnect(
     Args:
         smtp (smtplib.SMTP_SSL): The connection to replace; it may already be
             broken, in which case closing it is a no-op.
-        sender (str): Sender email address.
-        password (str): Password or app-specific password for the account.
-        host (str): SMTP server hostname.
-        port (int): SMTP SSL port number.
+        sender (Sender): Sender email address.
+        password (Password): Password or app-specific password for the account.
+        host (Host): SMTP server hostname.
+        port (Port): SMTP SSL port number.
 
     Returns:
         smtplib.SMTP_SSL: A new authenticated SMTP connection.
@@ -1060,12 +1067,12 @@ def _requires_reconnect(exc: Exception) -> bool:
 
 
 def send_emails(
-    sender: str,
-    password: str,
+    sender: Sender,
+    password: Password,
     emails: Sequence[EmailMessage],
     *,
-    host: str = DEFAULT_SMTP_HOST,
-    port: int = DEFAULT_SMTP_PORT,
+    host: Host = DEFAULT_SMTP_HOST,
+    port: Port = DEFAULT_SMTP_PORT,
     on_sent: Callable[[Sequence[str]], None] | None = None,
 ) -> int:
     """
@@ -1086,11 +1093,11 @@ def send_emails(
     Recipient addresses are already set in each EmailMessage object.
 
     Args:
-        sender (str): Sender email address.
-        password (str): Password or app-specific password for the account.
+        sender (Sender): Sender email address.
+        password (Password): Password or app-specific password for the account.
         emails (Sequence[EmailMessage]): EmailMessage objects to send.
-        host (str): SMTP server hostname.
-        port (int): SMTP SSL port number.
+        host (Host): SMTP server hostname.
+        port (Port): SMTP SSL port number.
         on_sent (Callable[[Sequence[str]], None] | None): Callback invoked
             with each sent email's accepted recipient addresses right after
             a successful send, e.g. to record them in a sent log.
