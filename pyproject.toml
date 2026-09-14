@@ -3,7 +3,7 @@ name = "send-mail"
 version = "0.1.0"
 description = "Script to send CV emails"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 dependencies = []
 
 [tool.ruff]
@@ -45,8 +45,6 @@ ignore = [
     "COM812",
     "D203",
     "D213",
-    "ANN101",
-    "ANN102",
     "ANN201",
     "ANN204",
     "ERA001",
@@ -64,9 +62,19 @@ ignore = [
 ]
 
 [tool.pyright]
+include = ["send_cv_mail.py"]
 typeCheckingMode = "strict"
-reportDeprecated = "none"
-reportInvalidTypeArguments = "none"
-reportUnknownArgumentType = "none"
-reportUnknownMemberType = "none"
-reportAssignmentType = "none"
+
+# Environment
+pythonVersion = "3.14"
+deprecateTypingAliases = true
+
+# Rules that default to "none" in strict mode
+reportCallInDefaultInitializer = "error"
+reportImplicitOverride = "error"
+reportImportCycles = "error"
+reportMissingSuperCall = "error"
+reportPropertyTypeMismatch = "error"
+reportUninitializedInstanceVariable = "error"
+reportUnnecessaryTypeIgnoreComment = "error"
+reportUnreachable = "error"

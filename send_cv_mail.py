@@ -5,6 +5,7 @@ import logging
 import mimetypes
 import re
 import smtplib
+import sys
 import textwrap
 import tomllib
 from collections.abc import Callable, Iterable, Sequence
@@ -13,28 +14,39 @@ from email.utils import localtime, make_msgid
 from logging import getLevelName
 from pathlib import Path
 from random import uniform
-from sys import version_info
 from time import sleep
-from typing import Any, NotRequired, TypedDict, cast
+from typing import Any, Final, NotRequired, TypedDict, cast
 
 # Default config directory in user profile / home directory.
-DEFAULT_CONFIG_DIR = Path.home() / ".config" / "send_cv"
-DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.toml"
-DEFAULT_CREDENTIALS_PATH = DEFAULT_CONFIG_DIR / "credentials.toml"
+DEFAULT_CONFIG_DIR: Final = Path.home() / ".config" / "send_cv"
+DEFAULT_CONFIG_PATH: Final = DEFAULT_CONFIG_DIR / "config.toml"
+DEFAULT_CREDENTIALS_PATH: Final = DEFAULT_CONFIG_DIR / "credentials.toml"
 
 # Default host and port for SMTP server.
-DEFAULT_SMTP_HOST = "smtp.gmail.com"
-DEFAULT_SMTP_PORT = 465
+DEFAULT_SMTP_HOST: Final = "smtp.gmail.com"
+DEFAULT_SMTP_PORT: Final = 465
 
 # Default location for the sent log, which records recipients that were sent
 # successfully so a later run can skip them.
-DEFAULT_SENT_LOG_PATH = Path(__file__).resolve().parent / "sent_emails.log"
+DEFAULT_SENT_LOG_PATH: Final = (
+    Path(__file__).resolve().parent / "sent_emails.log"
+)
 
 # Mail sending parameters.
-SMTP_TIMEOUT = 30.0  # Per-operation socket timeout for the SMTP connection.
+# Per-operation socket timeout for the SMTP connection.
+SMTP_TIMEOUT: Final = 30.0
 # Range of wait times between sending emails (in seconds).
-WAIT_TIMES = (3.0, 9.0)
-ATTEMPT_LIMIT = 5  # Number of attempts to send an email.
+WAIT_TIMES: Final = (3.0, 9.0)
+ATTEMPT_LIMIT: Final = 5  # Number of attempts to send an email.
+
+# SMTP response codes that defer a message: the server did not accept it,
+# so retrying cannot deliver a duplicate.
+TEMPORARY_SMTP_CODES: Final = frozenset({421, 450, 451, 452})
+
+# Address format accepted for senders and recipients.
+EMAIL_PATTERN: Final = re.compile(
+    r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)"
+)
 
 # Configuration file templates for auto-scaffolding.
 CREDENTIALS_TEMPLATE = f"""# SMTP credentials for sending emails.
@@ -45,15 +57,6 @@ password = "your-app-password"
 host = "{DEFAULT_SMTP_HOST}"
 port = {DEFAULT_SMTP_PORT}
 """
-
-
-class SmtpConfig(TypedDict):
-    """Schema for the [smtp] section in credentials.toml."""
-
-    sender: str
-    password: NotRequired[str]
-    host: NotRequired[str]
-    port: NotRequired[int | str]
 
 
 class EmailConfig(TypedDict):
@@ -151,7 +154,6 @@ def load_config(config_path: Path) -> EmailConfig:
             f"Configuration file not found at {config_path}. "
             "Please create it or check your --config argument."
         )
-        logger.error(msg)
         raise FileNotFoundError(msg)
 
     data = parse_toml(config_path)
@@ -164,10 +166,15 @@ def load_config(config_path: Path) -> EmailConfig:
         msg = f"Missing or invalid 'message' string in {config_path}"
         raise ValueError(msg)
 
+    attachment_raw = data.get("attachment_path", "")
+    if not isinstance(attachment_raw, str):
+        msg = f"Invalid 'attachment_path' (must be a string) in {config_path}"
+        raise ValueError(msg)
+
     return {
         "subject": data["subject"],
         "message": data["message"],
-        "attachment_path": data.get("attachment_path", ""),
+        "attachment_path": attachment_raw,
     }
 
 
@@ -195,32 +202,40 @@ def load_credentials(
             f"Credentials file not found at {credentials_path}. "
             "Please create it or check your --credentials argument."
         )
-        logger.error(msg)
         raise FileNotFoundError(msg)
 
     data = parse_toml(credentials_path)
 
-    if not isinstance(raw_smtp := data.get("smtp"), dict):
+    raw_smtp = data.get("smtp")
+    if not isinstance(raw_smtp, dict):
         msg = (
             f"Credentials file {credentials_path} must contain an [smtp] table"
         )
         raise ValueError(msg)
 
-    smtp_data = cast(SmtpConfig, raw_smtp)
+    # TOML values are arbitrary; every field is validated before use.
+    smtp_data = cast("dict[str, Any]", raw_smtp)
 
-    sender = smtp_data.get("sender")
-    if not sender or sender.strip() == "" or sender == "your.email@gmail.com":
+    raw_sender = smtp_data.get("sender")
+    sender = raw_sender.strip() if isinstance(raw_sender, str) else ""
+    if (
+        not sender
+        or sender == "your.email@gmail.com"
+        or not EMAIL_PATTERN.match(sender)
+    ):
         msg = (
-            f"Valid sender email address must be configured in {credentials_path} "
-            "under [smtp.sender]"
+            f"Valid sender email address must be configured in "
+            f"{credentials_path} under [smtp.sender]"
         )
         raise ValueError(msg)
 
-    password = smtp_data.get("password", "")
+    raw_password = smtp_data.get("password", "")
+    if not isinstance(raw_password, str):
+        msg = f"Invalid password (must be a string) in {credentials_path}"
+        raise ValueError(msg)
+    password = raw_password.strip()
     if require_password and (
-        not password
-        or password.strip() == ""
-        or password == "your-app-password"  # noqa: S105
+        not password or password == "your-app-password"  # noqa: S105
     ):
         msg = (
             f"Valid password must be configured in {credentials_path} "
@@ -228,18 +243,25 @@ def load_credentials(
         )
         raise ValueError(msg)
 
-    host = smtp_data.get("host", DEFAULT_SMTP_HOST)
-    if not host.strip():
-        host = DEFAULT_SMTP_HOST
+    raw_host = smtp_data.get("host", DEFAULT_SMTP_HOST)
+    if not isinstance(raw_host, str):
+        msg = f"Invalid SMTP host '{raw_host}' in {credentials_path}"
+        raise ValueError(msg)
+    host = raw_host.strip() or DEFAULT_SMTP_HOST
 
-    port_raw = smtp_data.get("port", DEFAULT_SMTP_PORT)
+    raw_port = smtp_data.get("port", DEFAULT_SMTP_PORT)
     try:
-        port = int(port_raw)
+        port = int(raw_port)
     except (ValueError, TypeError) as exc:
-        msg = f"Invalid SMTP port '{port_raw}' in {credentials_path}"
+        msg = f"Invalid SMTP port '{raw_port}' in {credentials_path}"
         raise ValueError(msg) from exc
+    if not 0 < port < 65536:
+        msg = (
+            f"SMTP port {port} is out of range (1-65535) in {credentials_path}"
+        )
+        raise ValueError(msg)
 
-    return sender.strip(), password.strip(), host.strip(), port
+    return sender, password, host, port
 
 
 def resolve_cv_path(
@@ -282,7 +304,6 @@ def resolve_cv_path(
 
     if not cv_path.exists():
         msg = f"CV attachment file not found at {cv_path}"
-        logger.error(msg)
         raise FileNotFoundError(msg)
 
     return cv_path
@@ -297,7 +318,6 @@ def main() -> None:
 
     if batch_size < 1:
         msg = "Batch size must be at least 1"
-        logger.error(msg)
         raise ValueError(msg)
 
     # Configure logging based on args
@@ -332,7 +352,13 @@ def main() -> None:
     receivers: list[str]
 
     if args.emails:
-        receivers = args.emails
+        receivers = [email.strip() for email in args.emails]
+        invalid_emails = [
+            email for email in receivers if not EMAIL_PATTERN.match(email)
+        ]
+        if invalid_emails:
+            msg = f"Invalid email address(es): {', '.join(invalid_emails)}"
+            raise ValueError(msg)
         logger.debug("Using receiver emails from command line: %s", receivers)
     elif args.emails_files:
         logger.debug("Using receiver emails from files: %s", args.emails_files)
@@ -348,7 +374,6 @@ def main() -> None:
     else:
         # This shouldn't happen due to mutually exclusive group
         msg = "No receiver emails provided"
-        logger.error(msg)
         raise ValueError(msg)
 
     # Remove duplicate addresses before building or sending anything.
@@ -423,36 +448,21 @@ def main() -> None:
         return
 
     # Send emails.
-    try:
-        sent_count = send_emails(
-            sender,
-            password,
-            emails,
-            host=host,
-            port=port,
-            on_sent=lambda sent: append_to_sent_log(sent_log_path, sent),
-        )
-    except smtplib.SMTPResponseException as resp_exc:
-        logger.exception(
-            "SMTP Error: %s - %s",
-            resp_exc.smtp_code,
-            resp_exc.smtp_error,
-        )
-        raise
-    except smtplib.SMTPException:
-        logger.exception("Failed to send email due to SMTP error")
-        raise
-    except TimeoutError:
-        logger.exception("Connection timed out while sending email")
-        raise
-    else:
-        logger.info(
-            "Sent %d of %d email(s) with attachment %s",
-            sent_count,
-            len(emails),
-            cv_name,
-        )
-        logger.debug("Full recipient list: %s", receivers)
+    sent_count = send_emails(
+        sender,
+        password,
+        emails,
+        host=host,
+        port=port,
+        on_sent=lambda sent: append_to_sent_log(sent_log_path, sent),
+    )
+    logger.info(
+        "Sent %d of %d email(s) with attachment %s",
+        sent_count,
+        len(emails),
+        cv_name,
+    )
+    logger.debug("Full recipient list: %s", receivers)
 
 
 def setup_argparse() -> argparse.ArgumentParser:
@@ -534,6 +544,7 @@ def setup_argparse() -> argparse.ArgumentParser:
         "skipped on the next run (default: %(default)s)",
     )
     parser.add_argument(
+        "-l",
         "-log",
         "--loglevel",
         default="info",
@@ -568,10 +579,9 @@ def load_file(file_path: Path) -> tuple[str, bytes]:
             file_data = fp.read()
             file_name = file_path.name
             logger.debug("Successfully read file: %s", file_name)
-    except (OSError, PermissionError) as exc:
+    except OSError as exc:
         msg = f"Failed to read file: {exc}"
-        logger.exception(msg)
-        raise
+        raise OSError(msg) from exc
 
     return file_name, file_data
 
@@ -588,15 +598,17 @@ def parse_toml(toml_path: Path) -> dict[str, Any]:
 
     Raises:
         OSError: If the file cannot be read.
-        tomllib.TOMLDecodeError: If the file cannot be parsed.
+        ValueError: If the file is not valid TOML.
     """
     try:
         with Path.open(toml_path, "rb") as f:
             data = tomllib.load(f)
             logger.debug("Successfully read configuration file")
-    except (OSError, tomllib.TOMLDecodeError) as exc:
+    except tomllib.TOMLDecodeError as exc:
+        msg = f"Invalid TOML in {toml_path}: {exc}"
+        raise ValueError(msg) from exc
+    except OSError as exc:
         msg = f"Failed to read configuration file: {exc}"
-        logger.exception(msg)
         raise OSError(msg) from exc
 
     return data
@@ -618,10 +630,6 @@ def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
         FileNotFoundError: If the file does not exist.
         OSError: If the file cannot be read.
     """
-    email_pattern = re.compile(
-        r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)"
-    )
-
     try:
         valid_emails: list[str] = []
 
@@ -641,7 +649,7 @@ def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
                     if len(email) == 0:
                         continue  # Skip empty lines without logging.
 
-                    if email_pattern.match(email):
+                    if EMAIL_PATTERN.match(email):
                         valid_emails.append(email)
                     else:
                         invalid_email_line_count_for_current_file += 1
@@ -669,9 +677,10 @@ def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
             )
 
         return valid_emails
-    except (OSError, PermissionError) as exc:
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
         msg = f"Failed to read email file: {exc}"
-        logger.exception(msg)
         raise OSError(msg) from exc
 
 
@@ -727,7 +736,7 @@ def load_sent_log(log_path: Path) -> set[str]:
                     continue
                 address = line.split()[0].lower()
                 sent.add(address)
-    except (OSError, PermissionError) as exc:
+    except OSError as exc:
         logger.warning(
             "Could not read sent log at %s (%s); will not skip any recipients",
             log_path,
@@ -752,7 +761,7 @@ def append_to_sent_log(log_path: Path, recipients: Iterable[str]) -> None:
         with log_path.open("a", encoding="utf-8") as fp:
             for recipient in recipients:
                 fp.write(f"{recipient.strip()} {now}\n")
-    except (OSError, PermissionError) as exc:
+    except OSError as exc:
         logger.warning(
             "Failed to record sent recipient(s) %s in log %s: %s",
             recipients,
@@ -888,9 +897,8 @@ def create_emails(
         email["Reply-To"] = sender  # Add Reply-To header.
         email["Date"] = localtime()
         email["Message-ID"] = make_msgid(domain=sender.split("@", 1)[1])
-        email["User-Agent"] = (
-            f"smtplib (Python {version_info.major}.{version_info.minor})"
-        )
+        py_version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        email["User-Agent"] = f"smtplib (Python {py_version})"
         # Set plain text content.
         email.set_content(config["message"], subtype="plain", charset="utf-8")
 
@@ -899,7 +907,7 @@ def create_emails(
     emails: list[EmailMessage] = []
 
     for i, receiver_pack in enumerate(
-        itertools.batched(receivers, batch_size)
+        itertools.batched(receivers, batch_size, strict=False)
     ):
         # Assign each batch a mail message.
         # if batch size is 1, the receiver will be added to the To header.
@@ -972,41 +980,72 @@ def _open_smtp_connection(
     raise OSError(msg)
 
 
+def _reconnect(
+    smtp: smtplib.SMTP_SSL,
+    sender: str,
+    password: str,
+    host: str,
+    port: int,
+) -> smtplib.SMTP_SSL:
+    """
+    Close a connection and return a fresh authenticated replacement.
+
+    Args:
+        smtp (smtplib.SMTP_SSL): The connection to replace; it may already be
+            broken, in which case closing it is a no-op.
+        sender (str): Sender email address.
+        password (str): Password or app-specific password for the account.
+        host (str): SMTP server hostname.
+        port (int): SMTP SSL port number.
+
+    Returns:
+        smtplib.SMTP_SSL: A new authenticated SMTP connection.
+    """
+    smtp.close()
+    return _open_smtp_connection(sender, password, host=host, port=port)
+
+
 def _is_transient_error(exc: Exception) -> bool:
     """
-    Return True if a send error may succeed when retried.
+    Return True if the server explicitly deferred the message.
 
-    Server responses 421, 450, 451 and 452 mean the server is temporarily
-    unable to handle the message. Transport errors (timeouts, resets,
-    dropped connections) are also transient.
+    Only temporary rejection codes make a message safe to retry: 421 (the
+    server is closing the transmission channel), 450, 451 and 452 all mean
+    the message was not accepted, so a retry cannot deliver it twice. A
+    refusal of every recipient is retryable only when every refusal was
+    temporary.
+
+    Transport failures (timeouts, resets, dropped connections) are not
+    retryable even though they are usually transient: the message may
+    already have been delivered when the failure surfaces.
 
     Args:
         exc (Exception): The exception raised while sending.
 
     Returns:
-        bool: True if the error is transient.
+        bool: True if the message can be retried without duplicating it.
     """
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        # Raised when every recipient was refused; values are (code, error).
+        codes = {code for code, _ in exc.recipients.values()}
+        return bool(codes) and codes <= TEMPORARY_SMTP_CODES
     if isinstance(exc, smtplib.SMTPResponseException):
-        return exc.smtp_code in (421, 450, 451, 452)
-    if isinstance(exc, smtplib.SMTPServerDisconnected):
-        return True
-    # SMTPException subclasses OSError on Python >= 3.12.4, so this
-    # fallback must come after the SMTP-specific checks: what remains
-    # here is pure transport errors (timeouts, resets, refused conns).
-    return isinstance(exc, OSError)
+        return exc.smtp_code in TEMPORARY_SMTP_CODES
+    return False
 
 
 def _requires_reconnect(exc: Exception) -> bool:
     """
-    Return True if a transient error left the connection unusable.
+    Return True if a send error left the connection unusable.
 
     Response code 421 means the server is closing the transmission channel,
     so the connection must be re-established. SMTPServerDisconnected and
     pure transport errors (timeouts, resets) also require a fresh
-    connection. Codes 450, 451 and 452 keep the connection usable.
+    connection. Temporary codes 450, 451 and 452, and permanent rejections,
+    keep the connection usable.
 
     Args:
-        exc (Exception): The transient exception raised while sending.
+        exc (Exception): The exception raised while sending.
 
     Returns:
         bool: True if the connection must be re-established.
@@ -1035,11 +1074,14 @@ def send_emails(
     Establishes a secure SSL connection to the SMTP server,
     authenticates with the given credentials, and sends each message.
 
-    Transient failures (temporary server responses, timeouts, resets) are
-    retried with backoff, reconnecting when the connection is lost. A
-    permanently rejected message is skipped and the run continues, all
-    failures are logged at the end. Only recipients the server accepted are
-    passed to `on_sent`.
+    Only temporary server rejections (codes 421, 450, 451 and 452) are
+    retried, with backoff and a fresh connection when the old one is
+    unusable: those codes mean the message was not accepted, so a retry
+    cannot deliver it twice. Transport failures (timeouts, resets, dropped
+    connections) are not retried, because the message may already have been
+    delivered by the time the failure surfaces. Failed messages are skipped,
+    the run continues, and every failure is logged at the end. Only
+    recipients the server accepted are passed to `on_sent`.
 
     Recipient addresses are already set in each EmailMessage object.
 
@@ -1066,14 +1108,47 @@ def send_emails(
 
     try:
         for i, email in enumerate(emails, start=1):
-            is_sent = False
             for attempt in range(1, ATTEMPT_LIMIT + 1):
                 try:
                     # sendmail returns {refused_addr: (code, error)} for
                     # recipients the server rejected while delivering to
                     # the rest; it raises if every recipient is refused.
                     refused = smtp.send_message(email)
-                    is_sent = True
+                except (smtplib.SMTPException, OSError) as exc:
+                    recipients = recipients_of(email, exclude=sender)
+                    transient = _is_transient_error(exc)
+                    if transient and attempt < ATTEMPT_LIMIT:
+                        logger.warning(
+                            "Temporary SMTP error for email %d/%d "
+                            "(attempt %d/%d): %s",
+                            i,
+                            len(emails),
+                            attempt,
+                            ATTEMPT_LIMIT,
+                            exc,
+                        )
+                        sleep(2**attempt + uniform(0, 1))  # noqa: S311
+                        if _requires_reconnect(exc):
+                            # The connection is gone or closing; retry fresh.
+                            smtp = _reconnect(
+                                smtp, sender, password, host, port
+                            )
+                        continue
+                    # A permanent rejection, or a transport failure whose
+                    # delivery state is unknown: retrying could deliver the
+                    # message twice, so record the failure and move on.
+                    failures.append(
+                        (
+                            recipients,
+                            f"failed after {ATTEMPT_LIMIT} attempts: {exc}"
+                            if transient
+                            else str(exc),
+                        )
+                    )
+                    if _requires_reconnect(exc):
+                        smtp = _reconnect(smtp, sender, password, host, port)
+                    break
+                else:
                     sent_messages += 1
 
                     # Log only the recipients the server accepted.
@@ -1096,38 +1171,8 @@ def send_emails(
                         on_sent(sent_recipients)
 
                     break
-                except (smtplib.SMTPException, OSError) as exc:
-                    recipients = recipients_of(email, exclude=sender)
-                    if not _is_transient_error(exc):
-                        # Permanent rejection: skip this batch and continue.
-                        failures.append((recipients, str(exc)))
-                        break
-                    if attempt == ATTEMPT_LIMIT:
-                        failures.append(
-                            (
-                                recipients,
-                                f"failed after {ATTEMPT_LIMIT} attempts: {exc}",
-                            )
-                        )
-                        break
-                    logger.warning(
-                        "Transient SMTP error for email %d/%d "
-                        "(attempt %d/%d): %s",
-                        i,
-                        len(emails),
-                        attempt,
-                        ATTEMPT_LIMIT,
-                        exc,
-                    )
-                    sleep(2**attempt + uniform(0, 1))  # noqa: S311
-                    if _requires_reconnect(exc):
-                        # The connection is gone or closing; retry fresh.
-                        smtp.close()
-                        smtp = _open_smtp_connection(
-                            sender, password, host=host, port=port
-                        )
 
-            if is_sent and i < len(emails):
+            if i < len(emails):
                 wait_time = uniform(*WAIT_TIMES)  # noqa: S311
                 logger.debug(
                     "Waiting for %.2f seconds before sending next email",
@@ -1150,4 +1195,13 @@ def send_emails(
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except smtplib.SMTPResponseException as exc:
+        logger.error("SMTP error %s: %s", exc.smtp_code, exc.smtp_error)
+        logger.debug("Traceback:", exc_info=True)
+        sys.exit(1)
+    except (ValueError, OSError) as exc:
+        logger.error("%s", exc)
+        logger.debug("Traceback:", exc_info=True)
+        sys.exit(1)
