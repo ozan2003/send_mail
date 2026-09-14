@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Send application emails with a CV attached through SMTP."""
+
 import argparse
 import itertools
 import logging
@@ -8,16 +10,27 @@ import smtplib
 import sys
 import textwrap
 import tomllib
-from collections.abc import Callable, Iterable, Sequence
 from email.message import EmailMessage
 from email.utils import localtime, make_msgid
 from logging import getLevelName
 from pathlib import Path
 from random import uniform
 from time import sleep
-from typing import Any, Final, NewType, NotRequired, TypedDict, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Final,
+    NewType,
+    NoReturn,
+    NotRequired,
+    TypedDict,
+    cast,
+)
 
-# Default config directory in user profile / home directory.
+if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable, Sequence
+
+# Default configuration directory in the user home directory.
 DEFAULT_CONFIG_DIR: Final = Path.home() / ".config" / "send_cv"
 DEFAULT_CONFIG_PATH: Final = DEFAULT_CONFIG_DIR / "config.toml"
 DEFAULT_CREDENTIALS_PATH: Final = DEFAULT_CONFIG_DIR / "credentials.toml"
@@ -28,25 +41,25 @@ Password = NewType("Password", str)
 Host = NewType("Host", str)
 Port = NewType("Port", int)
 
-# Default host and port for SMTP server.
+# Default host and port of the SMTP server.
 DEFAULT_SMTP_HOST: Final = Host("smtp.gmail.com")
 DEFAULT_SMTP_PORT: Final = Port(465)
 
-# Default location for the sent log, which records recipients that were sent
-# successfully so a later run can skip them.
+# Default location of the sent log. The log records the recipients that
+# received an email, so a later run does not email them again.
 DEFAULT_SENT_LOG_PATH: Final = (
     Path(__file__).resolve().parent / "sent_emails.log"
 )
 
 # Mail sending parameters.
-# Per-operation socket timeout for the SMTP connection.
+# Socket timeout for each operation on the SMTP connection, in seconds.
 SMTP_TIMEOUT: Final = 30.0
-# Range of wait times between sending emails (in seconds).
+# Shortest and longest wait between two emails, in seconds.
 WAIT_TIMES: Final = (3.0, 9.0)
-ATTEMPT_LIMIT: Final = 5  # Number of attempts to send an email.
+ATTEMPT_LIMIT: Final = 5  # Maximum number of attempts for one email.
 
-# SMTP response codes that defer a message: the server did not accept it,
-# so retrying cannot deliver a duplicate.
+# SMTP response codes that defer a message. The server did not accept the
+# message, so a retry cannot deliver it twice.
 TEMPORARY_SMTP_CODES: Final = frozenset({421, 450, 451, 452})
 
 # Address format accepted for senders and recipients.
@@ -54,11 +67,11 @@ EMAIL_PATTERN: Final = re.compile(
     r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)"
 )
 
-# Configuration file templates for auto-scaffolding.
-CREDENTIALS_TEMPLATE = f"""# SMTP credentials for sending emails.
+# Templates for the starter files.
+CREDENTIALS_TEMPLATE = f"""# SMTP credentials for the email account.
 [smtp]
 sender = "your.email@gmail.com"
-# For Gmail, use an App Password generated at https://myaccount.google.com/apppasswords
+# For Gmail, use an App Password. Get one at https://myaccount.google.com/apppasswords
 password = "your-app-password"
 host = "{DEFAULT_SMTP_HOST}"
 port = {DEFAULT_SMTP_PORT}
@@ -73,10 +86,10 @@ class EmailConfig(TypedDict):
     attachment_path: NotRequired[str]
 
 
-CONFIG_TEMPLATE = """# Email message template configuration.
+CONFIG_TEMPLATE = """# Message template for the emails.
 subject = "Application for Position"
 
-# Absolute path to the CV/resume attachment (e.g. "~/Documents/cv.pdf" or "C:/Users/.../cv.pdf")
+# Absolute path to the CV file, for example "~/Documents/cv.pdf" or "C:/Users/.../cv.pdf"
 attachment_path = "~/Documents/cv.pdf"
 
 message = \"\"\"
@@ -88,28 +101,29 @@ Best regards,
 \"\"\"
 """
 
-# Configure logging.
+# Logger for this module.
 logger = logging.getLogger(__name__)
 
 
 def ensure_config_scaffold(config_dir: Path) -> None:
-    """
-    Create configuration directory and starter template files if missing.
+    """Create the configuration directory and the starter files.
+
+    The function does nothing if the files exist.
 
     Args:
-        config_dir (Path): The configuration directory to scaffold.
+        config_dir (Path): Configuration directory to create.
     """
     config_dir.mkdir(parents=True, exist_ok=True)
 
     credentials_file = config_dir / "credentials.toml"
     if not credentials_file.exists():
         credentials_file.write_text(CREDENTIALS_TEMPLATE, encoding="utf-8")
-        logger.info("Created starter credentials file at %s", credentials_file)
+        logger.info("Created the credentials file at %s", credentials_file)
 
     config_file = config_dir / "config.toml"
     if not config_file.exists():
         config_file.write_text(CONFIG_TEMPLATE, encoding="utf-8")
-        logger.info("Created starter config file at %s", config_file)
+        logger.info("Created the configuration file at %s", config_file)
 
 
 def resolve_config_path(
@@ -117,21 +131,21 @@ def resolve_config_path(
     filename: str,
     default_path: Path,
 ) -> Path:
-    """
-    Resolve configuration file path with cascade search.
+    """Find the configuration file and return its path.
 
-    Precedence:
-        1. Explicit CLI argument (if provided).
-        2. Local directory (./filename).
-        3. Default path (~/.config/send_cv/filename).
+    The search uses this sequence:
+
+        1. The path from the command line, if the user gives one.
+        2. The current directory (./filename).
+        3. The default path (~/.config/send_cv/filename).
 
     Args:
-        explicit_path (str | None): Path provided via CLI option.
-        filename (str): Local filename to search for.
-        default_path (Path): Fallback user config path.
+        explicit_path (str | None): Path from the command line, if any.
+        filename (str): Name of the file to find in the current directory.
+        default_path (Path): Path to use if the other two are not available.
 
     Returns:
-        Path: The resolved file path.
+        Path: Path of the resolved file.
     """
     if explicit_path:
         return Path(explicit_path).expanduser().resolve()
@@ -142,40 +156,39 @@ def resolve_config_path(
 
 
 def load_config(config_path: Path) -> EmailConfig:
-    """
-    Load and validate the email template configuration file.
+    """Read the message template and make sure that it is correct.
 
     Args:
         config_path (Path): Path to config.toml.
 
     Returns:
-        EmailConfig: Parsed configuration dictionary.
+        EmailConfig: Data from the configuration file.
 
     Raises:
-        FileNotFoundError: If the configuration file does not exist.
-        ValueError: If required keys are missing or invalid.
+        FileNotFoundError: The configuration file does not exist.
+        ValueError: A required key is missing, or its value is not correct.
     """
     if not config_path.exists():
         msg = (
             f"Configuration file not found at {config_path}. "
-            "Please create it or check your --config argument."
+            "Create the file, or use a different --config argument."
         )
         raise FileNotFoundError(msg)
 
     data = parse_toml(config_path)
 
     if "subject" not in data or not isinstance(data["subject"], str):
-        msg = f"Missing or invalid 'subject' string in {config_path}"
+        msg = f"Missing or not correct 'subject' value in {config_path}"
         raise ValueError(msg)
 
     if "message" not in data or not isinstance(data["message"], str):
-        msg = f"Missing or invalid 'message' string in {config_path}"
+        msg = f"Missing or not correct 'message' value in {config_path}"
         raise ValueError(msg)
 
     attachment_raw = data.get("attachment_path", "")
     if not isinstance(attachment_raw, str):
-        msg = f"Invalid 'attachment_path' (must be a string) in {config_path}"
-        raise ValueError(msg)
+        msg = f"'attachment_path' must be a string in {config_path}"
+        raise TypeError(msg)
 
     return {
         "subject": data["subject"],
@@ -189,25 +202,25 @@ def load_credentials(
     *,
     require_password: bool = True,
 ) -> tuple[Sender, Password, Host, Port]:
-    """
-    Load and validate SMTP credentials from credentials.toml.
+    """Read the SMTP credentials and make sure that they are correct.
 
     Args:
         credentials_path (Path): Path to credentials.toml.
-        require_password (bool): Whether to enforce a valid password (False for dry-run).
+        require_password (bool): If True, the password is necessary. Use
+            False for a dry run.
 
     Returns:
-        tuple[Sender, Password, Host, Port]: Tuple of (sender, password,
-            host, port).
+        tuple[Sender, Password, Host, Port]: The sender address, the password,
+            the host, and the port.
 
     Raises:
-        FileNotFoundError: If the credentials file does not exist.
-        ValueError: If required SMTP credentials are missing or placeholders.
+        FileNotFoundError: The credentials file does not exist.
+        ValueError: A required value is missing, or it is a placeholder.
     """
     if not credentials_path.exists():
         msg = (
             f"Credentials file not found at {credentials_path}. "
-            "Please create it or check your --credentials argument."
+            "Create the file, or use a different --credentials argument."
         )
         raise FileNotFoundError(msg)
 
@@ -215,12 +228,10 @@ def load_credentials(
 
     raw_smtp = data.get("smtp")
     if not isinstance(raw_smtp, dict):
-        msg = (
-            f"Credentials file {credentials_path} must contain an [smtp] table"
-        )
-        raise ValueError(msg)
+        msg = f"Credentials file {credentials_path} must have an [smtp] table"
+        raise TypeError(msg)
 
-    # TOML values are arbitrary; every field is validated before use.
+    # TOML values can have any type, so the code makes sure of each field.
     smtp_data = cast("dict[str, Any]", raw_smtp)
 
     raw_sender = smtp_data.get("sender")
@@ -231,41 +242,39 @@ def load_credentials(
         or not EMAIL_PATTERN.match(sender)
     ):
         msg = (
-            f"Valid sender email address must be configured in "
-            f"{credentials_path} under [smtp.sender]"
+            f"Set a correct sender address in {credentials_path}, "
+            "under [smtp.sender]"
         )
         raise ValueError(msg)
 
     raw_password = smtp_data.get("password", "")
     if not isinstance(raw_password, str):
-        msg = f"Invalid password (must be a string) in {credentials_path}"
-        raise ValueError(msg)
+        msg = f"The password must be a string in {credentials_path}"
+        raise TypeError(msg)
     password = raw_password.strip()
     if require_password and (
         not password or password == "your-app-password"  # noqa: S105
     ):
         msg = (
-            f"Valid password must be configured in {credentials_path} "
+            f"Set a correct password in {credentials_path}, "
             "under [smtp.password]"
         )
         raise ValueError(msg)
 
     raw_host = smtp_data.get("host", DEFAULT_SMTP_HOST)
     if not isinstance(raw_host, str):
-        msg = f"Invalid SMTP host '{raw_host}' in {credentials_path}"
-        raise ValueError(msg)
+        msg = f"SMTP host '{raw_host}' in {credentials_path} is not a string"
+        raise TypeError(msg)
     host = raw_host.strip() or DEFAULT_SMTP_HOST
 
     raw_port = smtp_data.get("port", DEFAULT_SMTP_PORT)
     try:
         port = int(raw_port)
     except (ValueError, TypeError) as exc:
-        msg = f"Invalid SMTP port '{raw_port}' in {credentials_path}"
+        msg = f"SMTP port '{raw_port}' in {credentials_path} is not a number"
         raise ValueError(msg) from exc
     if not 0 < port < 65536:
-        msg = (
-            f"SMTP port {port} is out of range (1-65535) in {credentials_path}"
-        )
+        msg = f"SMTP port {port} in {credentials_path} must be between 1 and 65535"
         raise ValueError(msg)
 
     return Sender(sender), Password(password), Host(host), Port(port)
@@ -275,19 +284,19 @@ def resolve_cv_path(
     explicit_cv: str | None,
     config: EmailConfig,
 ) -> Path:
-    """
-    Resolve the CV attachment path, enforcing an absolute path from config.
+    """Find the CV file and return its absolute path.
 
     Args:
-        explicit_cv (str | None): Path provided via --cv CLI option.
-        config (EmailConfig): Parsed email configuration.
+        explicit_cv (str | None): Path from the --cv option, if any.
+        config (EmailConfig): Data from the configuration file.
 
     Returns:
-        Path: The resolved absolute path to the CV file.
+        Path: Absolute path of the CV file.
 
     Raises:
-        ValueError: If no CV path is provided or if config path is relative.
-        FileNotFoundError: If the CV file does not exist.
+        ValueError: No CV path is given, or the path in config.toml is
+            relative.
+        FileNotFoundError: The CV file does not exist.
     """
     if explicit_cv:
         cv_path = Path(explicit_cv).expanduser().resolve()
@@ -295,137 +304,152 @@ def resolve_cv_path(
         attachment_raw = config.get("attachment_path")
         if not attachment_raw or not attachment_raw.strip():
             msg = (
-                "No CV attachment path specified. Provide 'attachment_path' "
-                "in config.toml or pass --cv."
+                "No CV path is given. Set 'attachment_path' in config.toml, "
+                "or use the --cv option."
             )
             raise ValueError(msg)
 
         expanded = Path(attachment_raw).expanduser()
         if not expanded.is_absolute():
             msg = (
-                f"attachment_path in config.toml must be an absolute path "
-                f"(got '{attachment_raw}')"
+                f"'attachment_path' in config.toml must be an absolute path, "
+                f"not '{attachment_raw}'"
             )
             raise ValueError(msg)
         cv_path = expanded.resolve()
 
     if not cv_path.exists():
-        msg = f"CV attachment file not found at {cv_path}"
+        msg = f"CV file not found at {cv_path}"
         raise FileNotFoundError(msg)
 
     return cv_path
 
 
-def main() -> None:
-    """Run the main logic for the script."""
-    # Set up command-line argument parsing.
-    args = setup_argparse().parse_args()
+def configure_logging(loglevel: str) -> None:
+    """Set the log level and the format of the log lines.
 
-    batch_size = args.batch_size
-
-    if batch_size < 1:
-        msg = "Batch size must be at least 1"
-        raise ValueError(msg)
-
-    # Configure logging based on args
+    Args:
+        loglevel (str): Log level name, for example "info" or "debug".
+    """
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(message)s",
-        level=args.loglevel.upper(),
+        level=loglevel.upper(),
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
-    logger.setLevel(args.loglevel.upper())
-    logger.debug("Logging now set up to %s", getLevelName(logger.level))
+    logger.setLevel(loglevel.upper())
+    logger.debug("The log level is %s", getLevelName(logger.level))
 
-    # Auto-scaffold default config directory and templates if missing.
-    ensure_config_scaffold(DEFAULT_CONFIG_DIR)
 
-    # Resolve and load configuration file.
-    config_path = resolve_config_path(
-        args.config, "config.toml", DEFAULT_CONFIG_PATH
-    )
-    logger.debug("Using configuration file at %s", config_path)
-    config = load_config(config_path)
+def _receivers_from_args(args: argparse.Namespace) -> list[str]:
+    """Return the recipient addresses from the command line.
 
-    # Resolve and load credentials.
-    credentials_path = resolve_config_path(
-        args.credentials, "credentials.toml", DEFAULT_CREDENTIALS_PATH
-    )
-    logger.debug("Using credentials file at %s", credentials_path)
-    sender, password, host, port = load_credentials(
-        credentials_path, require_password=not args.dry_run
-    )
+    Args:
+        args (argparse.Namespace): The options and arguments from the command
+            line.
 
-    # Handle receiver emails based on which argument was provided
-    receivers: list[str]
+    Returns:
+        list[str]: Addresses from --emails, or from the files that
+            --emails-files names.
 
+    Raises:
+        ValueError: No recipient is given, or an address is not correct.
+    """
     if args.emails:
         receivers = [email.strip() for email in args.emails]
         invalid_emails = [
             email for email in receivers if not EMAIL_PATTERN.match(email)
         ]
         if invalid_emails:
-            msg = f"Invalid email address(es): {', '.join(invalid_emails)}"
+            msg = f"These email addresses are not correct: {', '.join(invalid_emails)}"
             raise ValueError(msg)
-        logger.debug("Using receiver emails from command line: %s", receivers)
-    elif args.emails_files:
-        logger.debug("Using receiver emails from files: %s", args.emails_files)
+        logger.debug(
+            "Recipient addresses from the command line: %s", receivers
+        )
+        return receivers
 
+    if args.emails_files:
+        logger.debug(
+            "Recipient addresses from the files: %s", args.emails_files
+        )
         emails_file_paths: Iterable[Path] = (
             Path(path).expanduser() for path in args.emails_files
         )
         receivers = load_emails_from_files(emails_file_paths)
-
         if len(receivers) == 0:
-            msg = f"No emails found in the files '{args.emails_files}'"
+            msg = f"No email addresses in the files '{args.emails_files}'"
             raise ValueError(msg)
-    else:
-        # This shouldn't happen due to mutually exclusive group
-        msg = "No receiver emails provided"
-        raise ValueError(msg)
+        return receivers
 
-    # Remove duplicate addresses before building or sending anything.
-    receivers, duplicate_count = deduplicate_emails(receivers)
+    # The argument group makes this impossible in practice.
+    msg = "No recipient addresses are given"
+    raise ValueError(msg)
+
+
+def pending_receivers(
+    args: argparse.Namespace, sent_log_path: Path
+) -> list[str]:
+    """Return the recipients that still need an email.
+
+    The function removes duplicate addresses first. Then it removes the
+    addresses in the sent log, so a second run continues where the first run
+    stopped.
+
+    Args:
+        args (argparse.Namespace): The options and arguments from the command
+            line.
+        sent_log_path (Path): Path to the sent log.
+
+    Returns:
+        list[str]: The addresses that do not have an email yet.
+
+    Raises:
+        ValueError: No recipient is given, or an address is not correct.
+    """
+    receivers, duplicate_count = deduplicate_emails(_receivers_from_args(args))
     if duplicate_count > 0:
-        logger.warning(
-            "Removed %d duplicate email address(es)", duplicate_count
-        )
+        logger.warning("Removed %d duplicate addresses", duplicate_count)
 
-    # Drop recipients already recorded as sent, so a re-run resumes instead
-    # of emailing anyone twice.
-    sent_log_path = Path(args.sent_log).expanduser().resolve()
     sent_recipients = load_sent_log(sent_log_path)
     if sent_recipients:
         receivers, skipped_count = filter_unsent(receivers, sent_recipients)
         if skipped_count > 0:
             logger.info(
-                "Skipping %d recipient(s) already in sent log %s",
+                "Skipped %d recipients. They are in the sent log %s",
                 skipped_count,
                 sent_log_path,
             )
 
-    if not receivers:
-        logger.info("No unsent recipients left, nothing to do.")
-        return
+    return receivers
 
-    # Create emails.
-    emails = create_emails(
-        sender,
-        receivers,
-        config=config,
-        batch_size=batch_size,
-    )
 
-    # Resolve and load CV attachment.
-    cv_path = resolve_cv_path(args.cv, config)
+def attach_cv(
+    emails: Sequence[EmailMessage],
+    explicit_cv: str | None,
+    config: EmailConfig,
+) -> tuple[str, bytes, str, str]:
+    """Attach the CV file to every email.
+
+    Args:
+        emails (Sequence[EmailMessage]): Messages to attach the CV to.
+        explicit_cv (str | None): Path from the --cv option, if any.
+        config (EmailConfig): Data from the configuration file.
+
+    Returns:
+        tuple[str, bytes, str, str]: The file name, the file data, and the
+            main type and subtype.
+
+    Raises:
+        ValueError: No CV path is given, or the path is relative.
+        FileNotFoundError: The CV file does not exist.
+    """
+    cv_path = resolve_cv_path(explicit_cv, config)
     cv_name, cv_data = load_file(cv_path)
 
-    # Determine MIME type.
     mime_type, _ = mimetypes.guess_type(cv_path)
     content_type = mime_type or "application/octet-stream"
     maintype, subtype = content_type.split("/", 1)
-    logger.debug("Determined MIME type: %s/%s", maintype, subtype)
+    logger.debug("MIME type: %s/%s", maintype, subtype)
 
-    # Add attachment for each email.
     for email in emails:
         email.add_attachment(
             cv_data,
@@ -434,27 +458,95 @@ def main() -> None:
             filename=cv_name,
         )
 
-    # Preview mode: print the messages without connecting to an SMTP server
-    # or touching the sent log.
-    if args.dry_run:
+    return cv_name, cv_data, maintype, subtype
+
+
+def print_dry_run(
+    emails: Sequence[EmailMessage],
+    receivers: Sequence[str],
+    sender: Sender,
+    attachment: tuple[str, bytes, str, str],
+) -> None:
+    """Print the emails without sending them.
+
+    The function does not connect to a server.
+
+    Args:
+        emails (Sequence[EmailMessage]): The emails to print.
+        receivers (Sequence[str]): Recipient addresses.
+        sender (Sender): Sender address. The function does not count it as a
+            recipient.
+        attachment (tuple[str, bytes, str, str]): File name, file data, main
+            type, and subtype of the CV attachment.
+    """
+    cv_name, cv_data, maintype, subtype = attachment
+    print(f"[DRY RUN] Emails: {len(emails)} | Recipients: {len(receivers)}")
+    print(
+        f"[DRY RUN] Attachment: {cv_name} "
+        f"({len(cv_data)} bytes, {maintype}/{subtype})"
+    )
+    for i, email in enumerate(emails, start=1):
+        bcc = email.get("Bcc", "")
         print(
-            f"[DRY RUN] Would send {len(emails)} email(s) to "
-            f"{len(receivers)} recipient(s)"
+            f"[DRY RUN] Email {i}: To={email['To']} | "
+            f"Bcc={bcc or '-'} | Subject={email['Subject']} | "
+            f"Recipients={len(recipients_of(email, exclude=sender))}"
         )
-        print(
-            f"[DRY RUN] Attachment: {cv_name} "
-            f"({len(cv_data)} bytes, {maintype}/{subtype})"
-        )
-        for i, email in enumerate(emails, start=1):
-            bcc = email.get("Bcc", "")
-            print(
-                f"[DRY RUN] Message {i}: To={email['To']} | "
-                f"Bcc={bcc if bcc else '-'} | Subject={email['Subject']} | "
-                f"Recipients={len(recipients_of(email, exclude=sender))}"
-            )
+
+
+def main() -> None:
+    """Read the configuration and send the emails."""
+    # Read the command line.
+    args = parse_args()
+
+    if args.batch_size < 1:
+        msg = "The batch size must be 1 or more"
+        raise ValueError(msg)
+
+    configure_logging(args.loglevel)
+
+    # Create the default directory and the templates if they are missing.
+    ensure_config_scaffold(DEFAULT_CONFIG_DIR)
+
+    # Read the configuration file.
+    config_path = resolve_config_path(
+        args.config, "config.toml", DEFAULT_CONFIG_PATH
+    )
+    logger.debug("Configuration file: %s", config_path)
+    config = load_config(config_path)
+
+    # Read the credentials.
+    credentials_path = resolve_config_path(
+        args.credentials, "credentials.toml", DEFAULT_CREDENTIALS_PATH
+    )
+    logger.debug("Credentials file: %s", credentials_path)
+    sender, password, host, port = load_credentials(
+        credentials_path, require_password=not args.dry_run
+    )
+
+    # Get the recipients. The function removes duplicates and the addresses
+    # that are already in the sent log.
+    sent_log_path = Path(args.sent_log).expanduser().resolve()
+    receivers = pending_receivers(args, sent_log_path)
+
+    if not receivers:
+        logger.info("No recipients are left to email.")
         return
 
-    # Send emails.
+    emails = create_emails(
+        sender,
+        receivers,
+        config=config,
+        batch_size=args.batch_size,
+    )
+    attachment = attach_cv(emails, args.cv, config)
+
+    # A dry run prints the messages and does not connect to a server.
+    if args.dry_run:
+        print_dry_run(emails, receivers, sender, attachment)
+        return
+
+    # Send the messages.
     sent_count = send_emails(
         sender,
         password,
@@ -464,34 +556,37 @@ def main() -> None:
         on_sent=lambda sent: append_to_sent_log(sent_log_path, sent),
     )
     logger.info(
-        "Sent %d of %d email(s) with attachment %s",
+        "Sent %d of %d emails with attachment %s",
         sent_count,
         len(emails),
-        cv_name,
+        attachment[0],
     )
-    logger.debug("Full recipient list: %s", receivers)
+    logger.debug("All recipients: %s", receivers)
 
 
-def setup_argparse() -> argparse.ArgumentParser:
-    """
-    Build and return the command-line argument parser.
+def parse_args() -> argparse.Namespace:
+    """Build the command-line parser and return the parsed arguments.
 
     Returns:
-        argparse.ArgumentParser: A configured argument parser.
+        argparse.Namespace: The options and arguments from the command line.
     """
     parser = argparse.ArgumentParser(
-        description="Send emails with an attachment.",
+        description="Send application emails with a CV attached.",
         epilog=textwrap.dedent(f"""
                 Configuration:
-                    - Config file: Stores subject, body, and attachment_path
-                      (default: ./config.toml or {DEFAULT_CONFIG_PATH})
-                    - Credentials file: Stores [smtp] sender, password, host, port
-                      (default: ./credentials.toml or {DEFAULT_CREDENTIALS_PATH})
+                    - The configuration file holds the subject, the message,
+                      and attachment_path (default: ./config.toml or
+                      {DEFAULT_CONFIG_PATH})
+                    - The credentials file holds [smtp] sender, password, host,
+                      and port (default: ./credentials.toml or
+                      {DEFAULT_CREDENTIALS_PATH})
 
                 Sent log:
-                    Recipients are recorded after each successful send in the file
-                    given by --sent-log (default: {DEFAULT_SENT_LOG_PATH}).
-                    Recipients already in the log are skipped on the next run.
+                    The script writes each recipient to the sent log after a
+                    successful send.
+                    The log file is --sent-log (default:
+                    {DEFAULT_SENT_LOG_PATH}).
+                    A later run skips the recipients in the log.
                 """),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -502,14 +597,14 @@ def setup_argparse() -> argparse.ArgumentParser:
         "--emails",
         type=str,
         nargs="+",
-        help="Email address of the recipient(s)",
+        help="Email address of each recipient",
     )
     group.add_argument(
         "-f",
         "--emails-files",
         type=str,
         nargs="+",
-        help="Path to the file(s) containing email addresses",
+        help="Path to each file with email addresses",
     )
 
     parser.add_argument(
@@ -535,20 +630,20 @@ def setup_argparse() -> argparse.ArgumentParser:
         "--batch-size",
         type=int,
         default=3,
-        help="Number of emails to send in a single batch",
+        help="Number of emails in each batch",
     )
     parser.add_argument(
         "-n",
         "--dry-run",
         action="store_true",
-        help="Build and preview the emails without sending them",
+        help="Print the emails and do not send them",
     )
     parser.add_argument(
         "--sent-log",
         type=str,
         default=str(DEFAULT_SENT_LOG_PATH),
-        help="File that records sent recipients; recipients already in it are "
-        "skipped on the next run (default: %(default)s)",
+        help="File that records the recipients of each email. A later run "
+        "skips the recipients in this file (default: %(default)s)",
     )
     parser.add_argument(
         "-l",
@@ -556,150 +651,165 @@ def setup_argparse() -> argparse.ArgumentParser:
         "--loglevel",
         default="info",
         choices=("debug", "info", "warning", "error", "critical"),
-        help="Provide logging level",
+        help="Set the log level",
     )
-    return parser
+    return parser.parse_args()
 
 
 def load_file(file_path: Path) -> tuple[str, bytes]:
-    """
-    Read a file and return its name and contents.
+    """Read a file and return its name and its data.
 
     Args:
         file_path (Path): Path to the file.
 
     Returns:
-        tuple[str, bytes]: A tuple of file name and file bytes.
+        tuple[str, bytes]: The file name and the file data.
 
     Raises:
-        FileNotFoundError: If the file does not exist.
-        OSError: If the file cannot be read.
+        FileNotFoundError: The file does not exist.
+        OSError: The file cannot be read.
     """
     if not file_path.exists():
-        msg = f"file not found at {file_path}"
+        msg = f"File not found at {file_path}"
         logger.error(msg)
         raise FileNotFoundError(msg)
 
-    # Read file.
     try:
         with file_path.open("rb") as fp:
             file_data = fp.read()
             file_name = file_path.name
-            logger.debug("Successfully read file: %s", file_name)
+            logger.debug("Read the file %s", file_name)
     except OSError as exc:
-        msg = f"Failed to read file: {exc}"
+        msg = f"Failed to read the file: {exc}"
         raise OSError(msg) from exc
 
     return file_name, file_data
 
 
 def parse_toml(toml_path: Path) -> dict[str, Any]:
-    """
-    Parse a TOML file and return the resulting data.
+    """Read a TOML file and return its data.
 
     Args:
         toml_path (Path): Path to the TOML file.
 
     Returns:
-        dict[str, Any]: Dictionary with parsed TOML data.
+        dict[str, Any]: The data from the TOML file.
 
     Raises:
-        OSError: If the file cannot be read.
-        ValueError: If the file is not valid TOML.
+        OSError: The file cannot be read.
+        ValueError: The TOML syntax is not correct.
     """
     try:
         with Path.open(toml_path, "rb") as f:
             data = tomllib.load(f)
-            logger.debug("Successfully read configuration file")
+            logger.debug("Read the configuration file")
     except tomllib.TOMLDecodeError as exc:
-        msg = f"Invalid TOML in {toml_path}: {exc}"
+        msg = f"The TOML syntax in {toml_path} is not correct: {exc}"
         raise ValueError(msg) from exc
     except OSError as exc:
-        msg = f"Failed to read configuration file: {exc}"
+        msg = f"Failed to read the configuration file: {exc}"
         raise OSError(msg) from exc
 
     return data
 
 
-def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
-    """
-    Load email addresses from one or more files while validating their format.
-
-    Invalid addresses are skipped and logged with file name and line number.
+def _read_email_file(path: Path) -> tuple[list[str], int]:
+    """Read one address file and return its addresses.
 
     Args:
-        file_paths (Iterable[Path]): Paths to files containing email addresses.
+        path (Path): Path to the file with the email addresses.
 
     Returns:
-        list[str]: List of valid email addresses.
+        tuple[list[str], int]: The correct addresses, and the number of lines
+            that do not have the address format.
 
     Raises:
-        FileNotFoundError: If the file does not exist.
-        OSError: If the file cannot be read.
+        FileNotFoundError: The file does not exist.
+        OSError: The file cannot be read.
     """
-    try:
-        valid_emails: list[str] = []
+    if not path.exists():
+        msg = f"Email file not found at {path}"
+        raise FileNotFoundError(msg)
+    logger.debug("Email file: %s", path)
 
-        total_invalid_email_line_count = 0
-        for path in file_paths:
-            # Existence check for each file.
-            if not path.exists():
-                msg = f"Email file not found at {path}"
-                logger.error(msg)
-                raise FileNotFoundError(msg)
-            logger.debug("Email file found at %s", path)
+    valid_emails: list[str] = []
+    invalid_count = 0
+    with path.open("r", encoding="utf-8") as fp:
+        for line_num, line in enumerate(fp, start=1):
+            email = line.strip()
+            if len(email) == 0:
+                continue  # Ignore empty lines.
 
-            invalid_email_line_count_for_current_file = 0
-            with path.open("r", encoding="utf-8") as fp:
-                for line_num, line in enumerate(fp, start=1):
-                    email = line.strip()
-                    if len(email) == 0:
-                        continue  # Skip empty lines without logging.
-
-                    if EMAIL_PATTERN.match(email):
-                        valid_emails.append(email)
-                    else:
-                        invalid_email_line_count_for_current_file += 1
-                        logger.warning(
-                            "Invalid email address '%s' in file %s (line %d)",
-                            email,
-                            path,
-                            line_num,
-                        )
-
-            if invalid_email_line_count_for_current_file > 0:
-                logger.info(
-                    "Skipped %d invalid email address(es) in file %s",
-                    invalid_email_line_count_for_current_file,
+            if EMAIL_PATTERN.match(email):
+                valid_emails.append(email)
+            else:
+                invalid_count += 1
+                logger.warning(
+                    "Email address '%s' is not correct in file %s, line %d",
+                    email,
                     path,
-                )
-                total_invalid_email_line_count += (
-                    invalid_email_line_count_for_current_file
+                    line_num,
                 )
 
-        if total_invalid_email_line_count > 0:
-            logger.info(
-                "Skipped %d invalid email address(es) across all files",
-                total_invalid_email_line_count,
-            )
+    if invalid_count > 0:
+        logger.info(
+            "Skipped %d email addresses that are not correct in %s",
+            invalid_count,
+            path,
+        )
 
-        return valid_emails
+    return valid_emails, invalid_count
+
+
+def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
+    """Read email addresses from one or more files.
+
+    The function skips the addresses that are not correct. It logs the file
+    name and the line number of each one.
+
+    Args:
+        file_paths (Iterable[Path]): Paths to the files with the addresses.
+
+    Returns:
+        list[str]: The addresses that are correct.
+
+    Raises:
+        FileNotFoundError: A file does not exist.
+        OSError: A file cannot be read.
+    """
+    valid_emails: list[str] = []
+    total_invalid_count = 0
+    try:
+        for path in file_paths:
+            file_emails, invalid_count = _read_email_file(path)
+            valid_emails.extend(file_emails)
+            total_invalid_count += invalid_count
     except FileNotFoundError:
         raise
     except OSError as exc:
-        msg = f"Failed to read email file: {exc}"
+        msg = f"Failed to read an email file: {exc}"
         raise OSError(msg) from exc
+    else:
+        if total_invalid_count > 0:
+            logger.info(
+                "Skipped %d email addresses that are not correct in all files",
+                total_invalid_count,
+            )
+
+        return valid_emails
 
 
 def deduplicate_emails(receivers: Iterable[str]) -> tuple[list[str], int]:
-    """
-    Remove duplicate emails while preserving case-insensitive first appearance.
+    """Remove duplicate addresses and keep the first occurrence.
+
+    The comparison ignores uppercase and lowercase letters.
 
     Args:
-        receivers (Iterable[str]): Iterable of email addresses.
+        receivers (Iterable[str]): The email addresses.
 
     Returns:
-        tuple[list[str], int]: (deduplicated email list, duplicate count).
+        tuple[list[str], int]: The addresses without duplicates, and the
+            number of duplicates.
     """
     seen: set[str] = set()
     unique: list[str] = []
@@ -711,7 +821,7 @@ def deduplicate_emails(receivers: Iterable[str]) -> tuple[list[str], int]:
             continue
         if normalized in seen:
             duplicate_count += 1
-            logger.debug("Ignoring duplicate email address: %s", email)
+            logger.debug("Ignored the duplicate address %s", email)
             continue
         seen.add(normalized)
         unique.append(email)
@@ -720,16 +830,15 @@ def deduplicate_emails(receivers: Iterable[str]) -> tuple[list[str], int]:
 
 
 def load_sent_log(log_path: Path) -> set[str]:
-    """
-    Read the sent log and return normalized email addresses already sent.
+    """Read the sent log and return the addresses in it.
 
-    Non-existent log file returns an empty set.
+    The function returns an empty set if the log file does not exist.
 
     Args:
-        log_path (Path): Path to the sent recipients log file.
+        log_path (Path): Path to the sent log.
 
     Returns:
-        set[str]: Set of lowercase, stripped email addresses already sent.
+        set[str]: The addresses in the log, in lowercase and without spaces.
     """
     if not log_path.exists():
         return set()
@@ -737,15 +846,15 @@ def load_sent_log(log_path: Path) -> set[str]:
     sent: set[str] = set()
     try:
         with log_path.open("r", encoding="utf-8") as fp:
-            for line in fp:
-                line = line.strip()
-                if not line or line.startswith("#"):
+            for raw_line in fp:
+                entry = raw_line.strip()
+                if not entry or entry.startswith("#"):
                     continue
-                address = line.split()[0].lower()
-                sent.add(address)
+                sent.add(entry.split()[0].lower())
     except OSError as exc:
         logger.warning(
-            "Could not read sent log at %s (%s); will not skip any recipients",
+            "Cannot read the sent log at %s (%s). The script does not skip "
+            "any recipients",
             log_path,
             exc,
         )
@@ -755,12 +864,11 @@ def load_sent_log(log_path: Path) -> set[str]:
 
 
 def append_to_sent_log(log_path: Path, recipients: Iterable[str]) -> None:
-    """
-    Append sent recipient addresses to the sent log file with timestamps.
+    """Add recipient addresses and the current time to the sent log.
 
     Args:
         log_path (Path): Path to the log file.
-        recipients (Iterable[str]): Accepted email addresses.
+        recipients (Iterable[str]): The addresses that the server accepted.
     """
     now = localtime().strftime("%Y-%m-%dT%H:%M:%S%z")
     try:
@@ -770,7 +878,7 @@ def append_to_sent_log(log_path: Path, recipients: Iterable[str]) -> None:
                 fp.write(f"{recipient.strip()} {now}\n")
     except OSError as exc:
         logger.warning(
-            "Failed to record sent recipient(s) %s in log %s: %s",
+            "Failed to write the recipients %s to the sent log %s: %s",
             recipients,
             log_path,
             exc,
@@ -781,15 +889,15 @@ def filter_unsent(
     receivers: Iterable[str],
     sent_recipients: set[str],
 ) -> tuple[list[str], int]:
-    """
-    Filter out recipients that already appear in the sent log.
+    """Remove the recipients that are already in the sent log.
 
     Args:
-        receivers (Iterable[str]): Candidate recipient email addresses.
-        sent_recipients (set[str]): Normalized set of addresses already sent.
+        receivers (Iterable[str]): The candidate email addresses.
+        sent_recipients (set[str]): The addresses from the sent log.
 
     Returns:
-        tuple[list[str], int]: (unsent recipients, skipped count).
+        tuple[list[str], int]: The recipients that remain, and the number that
+            the function removed.
     """
     unsent: list[str] = []
     skipped_count = 0
@@ -799,7 +907,7 @@ def filter_unsent(
         if normalized in sent_recipients:
             skipped_count += 1
             logger.debug(
-                "Skipping %s (already in sent log)",
+                "Already in the sent log: %s",
                 email,
             )
         else:
@@ -813,15 +921,14 @@ def recipients_of(
     *,
     exclude: str | None = None,
 ) -> list[str]:
-    """
-    Extract all distinct recipient addresses from To and Bcc headers.
+    """Return the recipient addresses from the To and Bcc headers.
 
     Args:
-        email (EmailMessage): The email message object.
-        exclude (str | None): An address to filter out (e.g. the sender).
+        email (EmailMessage): The email message.
+        exclude (str | None): An address to omit, for example the sender.
 
     Returns:
-        list[str]: Cleaned list of recipient email addresses.
+        list[str]: The recipient addresses.
     """
     normalized_exclude = exclude.strip().lower() if exclude else None
 
@@ -843,31 +950,28 @@ def create_emails(
     config: EmailConfig,
     batch_size: int,
 ) -> list[EmailMessage]:
-    """
-    Build email messages from the sender, recipients, and config.
+    """Build the emails for the recipients.
 
-    Subject and message body are read from config. Reply-To and Date headers
-    are set automatically. Messages are plain text.
+    The subject and the message body come from the configuration file. The
+    function also sets the Reply-To and Date headers. The emails contain
+    plain text.
 
-    Recipients are grouped into batches of `batch_size` to help avoid provider
-    sending limits:
+    The function puts the recipients in groups of `batch_size`, because email
+    providers limit the number of messages:
 
-        - If `batch_size` == 1, the recipient is set in the To header.
-        - If `batch_size` > 1, recipients are set in Bcc and the sender is placed
-      in To to avoid a blank To header, which some filters reject.
+        - If `batch_size` is 1, the recipient goes in the To header.
+        - If `batch_size` is more than 1, the recipients go in the Bcc header.
+          The sender goes in the To header, because some filters reject a
+          message with an empty To header.
 
     Args:
         sender (Sender): Sender email address.
         receivers (list[str]): Recipient email addresses.
-        config (EmailConfig): Configuration containing subject and message.
-        batch_size (int): Number of recipients per message.
+        config (EmailConfig): The subject and the message for the emails.
+        batch_size (int): Number of recipients in each message.
 
     Returns:
-        list[EmailMessage]: Constructed email messages.
-
-    Raises:
-        ValueError: If sender or receivers are missing.
-        TypeError: If required config keys are missing or invalid.
+        list[EmailMessage]: The email messages.
     """
 
     def build_single_email_message(
@@ -875,20 +979,18 @@ def create_emails(
         receivers: Sequence[str],
         config: EmailConfig,
     ) -> EmailMessage:
-        """
-        Build and return one email message.
+        """Build one email message and return it.
 
-        The function sets standard headers (From, To, Bcc, Subject,
-        Reply-To, and Date) and fills the message body using values from
-        the provided configuration.
+        The function sets the From, To, Bcc, Subject, Reply-To, and Date
+        headers. It fills the body with the message from the configuration.
 
         Args:
             sender (Sender): Sender email address.
             receivers (Sequence[str]): One or more recipient email addresses.
-            config (EmailConfig): Configuration containing subject and message.
+            config (EmailConfig): The subject and the message for the email.
 
         Returns:
-            EmailMessage: The constructed email message.
+            EmailMessage: The email message.
         """
         email = EmailMessage()
         email["From"] = sender
@@ -896,17 +998,17 @@ def create_emails(
         if len(receivers) == 1:
             email["To"] = receivers[0].strip()
         else:
-            email["To"] = sender  # Some mail filters reject blank To's.
-            # Don't let them see each other.
+            email["To"] = sender  # Some filters reject an empty To header.
+            # The recipients do not see each other.
             email["Bcc"] = ",".join(map(str.strip, receivers))
 
         email["Subject"] = config["subject"]
-        email["Reply-To"] = sender  # Add Reply-To header.
+        email["Reply-To"] = sender
         email["Date"] = localtime()
         email["Message-ID"] = make_msgid(domain=sender.split("@", 1)[1])
         py_version = f"{sys.version_info.major}.{sys.version_info.minor}"
         email["User-Agent"] = f"smtplib (Python {py_version})"
-        # Set plain text content.
+        # The body is plain text.
         email.set_content(config["message"], subtype="plain", charset="utf-8")
 
         return email
@@ -916,12 +1018,10 @@ def create_emails(
     for i, receiver_pack in enumerate(
         itertools.batched(receivers, batch_size, strict=False)
     ):
-        # Assign each batch a mail message.
-        # if batch size is 1, the receiver will be added to the To header.
         email = build_single_email_message(sender, receiver_pack, config)
 
-        # Debug log the email headers.
-        logger.debug("Email header %d:", i)
+        # Write the headers to the debug log.
+        logger.debug("Email %d headers:", i)
         for header, value in email.items():
             logger.debug("\t%s: %s", header, value)
 
@@ -936,12 +1036,11 @@ def _open_smtp_connection(
     host: Host = DEFAULT_SMTP_HOST,
     port: Port = DEFAULT_SMTP_PORT,
 ) -> smtplib.SMTP_SSL:
-    """
-    Open an authenticated SMTP connection, retrying transient failures.
+    """Open an SMTP connection and log in.
 
-    The connection attempt is retried up to ATTEMPT_LIMIT times with
-    exponential backoff when the server is temporarily unavailable.
-    Authentication failures are not retried.
+    If the server is not available, the function tries again up to
+    ATTEMPT_LIMIT times. The wait between two attempts doubles each time. The
+    function does not try again if the server rejects the credentials.
 
     Args:
         sender (Sender): Sender email address.
@@ -950,11 +1049,11 @@ def _open_smtp_connection(
         port (Port): SMTP SSL port number.
 
     Returns:
-        smtplib.SMTP_SSL: An authenticated SMTP connection.
+        smtplib.SMTP_SSL: An SMTP connection that is ready to use.
 
     Raises:
-        smtplib.SMTPAuthenticationError: If the credentials are rejected.
-        OSError: If the connection could not be established.
+        smtplib.SMTPAuthenticationError: The server rejected the credentials.
+        OSError: The connection cannot be established.
     """
     last_exc: Exception | None = None
 
@@ -963,7 +1062,6 @@ def _open_smtp_connection(
         try:
             smtp = smtplib.SMTP_SSL(host, port, timeout=SMTP_TIMEOUT)
             smtp.login(sender, password)
-            return smtp
         except (smtplib.SMTPException, OSError) as exc:
             if smtp is not None:
                 smtp.close()
@@ -973,17 +1071,18 @@ def _open_smtp_connection(
             if attempt == ATTEMPT_LIMIT:
                 break
             logger.warning(
-                "Transient error connecting to SMTP server "
-                "(attempt %d/%d): %s",
+                "Cannot connect to the SMTP server (attempt %d/%d): %s",
                 attempt,
                 ATTEMPT_LIMIT,
                 exc,
             )
-            sleep(2**attempt + uniform(0, 1))  # noqa: S311
+            sleep(2**attempt + uniform(0, 1))
+        else:
+            return smtp
 
     if last_exc is not None:
         raise last_exc
-    msg = "SMTP connection failed"
+    msg = "Cannot connect to the SMTP server"
     raise OSError(msg)
 
 
@@ -994,46 +1093,46 @@ def _reconnect(
     host: Host,
     port: Port,
 ) -> smtplib.SMTP_SSL:
-    """
-    Close a connection and return a fresh authenticated replacement.
+    """Close a connection and return a new connection.
 
     Args:
-        smtp (smtplib.SMTP_SSL): The connection to replace; it may already be
-            broken, in which case closing it is a no-op.
+        smtp (smtplib.SMTP_SSL): The connection to replace. It can be broken,
+            and then closing it does nothing.
         sender (Sender): Sender email address.
         password (Password): Password or app-specific password for the account.
         host (Host): SMTP server hostname.
         port (Port): SMTP SSL port number.
 
     Returns:
-        smtplib.SMTP_SSL: A new authenticated SMTP connection.
+        smtplib.SMTP_SSL: A new SMTP connection that is ready to use.
     """
     smtp.close()
     return _open_smtp_connection(sender, password, host=host, port=port)
 
 
 def _is_transient_error(exc: Exception) -> bool:
-    """
-    Return True if the server explicitly deferred the message.
+    """Return True if the server deferred the email.
 
-    Only temporary rejection codes make a message safe to retry: 421 (the
-    server is closing the transmission channel), 450, 451 and 452 all mean
-    the message was not accepted, so a retry cannot deliver it twice. A
-    refusal of every recipient is retryable only when every refusal was
-    temporary.
+    Only the temporary codes 421, 450, 451, and 452 make a new attempt safe.
+    The server did not accept the email, so a new attempt cannot deliver it
+    twice. Code 421 means that the server closes the channel.
 
-    Transport failures (timeouts, resets, dropped connections) are not
-    retryable even though they are usually transient: the message may
-    already have been delivered when the failure surfaces.
+    If the server refuses all recipients, a new attempt is safe only when
+    every refusal is temporary.
+
+    Transport errors (timeouts, resets, and closed connections) are not safe
+    to retry, although they are usually temporary. The message can arrive
+    before the error appears.
 
     Args:
-        exc (Exception): The exception raised while sending.
+        exc (Exception): The error from the send operation.
 
     Returns:
-        bool: True if the message can be retried without duplicating it.
+        bool: True if a new attempt cannot deliver the email twice.
     """
     if isinstance(exc, smtplib.SMTPRecipientsRefused):
-        # Raised when every recipient was refused; values are (code, error).
+        # This error occurs when the server refuses all recipients. The
+        # values are (code, error) pairs.
         codes = {code for code, _ in exc.recipients.values()}
         return bool(codes) and codes <= TEMPORARY_SMTP_CODES
     if isinstance(exc, smtplib.SMTPResponseException):
@@ -1042,20 +1141,20 @@ def _is_transient_error(exc: Exception) -> bool:
 
 
 def _requires_reconnect(exc: Exception) -> bool:
-    """
-    Return True if a send error left the connection unusable.
+    """Return True if a send error made the connection unusable.
 
-    Response code 421 means the server is closing the transmission channel,
-    so the connection must be re-established. SMTPServerDisconnected and
-    pure transport errors (timeouts, resets) also require a fresh
-    connection. Temporary codes 450, 451 and 452, and permanent rejections,
-    keep the connection usable.
+    Code 421 means that the server closes the channel, so the script must
+    open a new connection. The same is true after SMTPServerDisconnected and
+    after a transport error, for example a timeout or a reset.
+
+    Codes 450, 451, and 452, and permanent rejections, keep the connection
+    usable.
 
     Args:
-        exc (Exception): The exception raised while sending.
+        exc (Exception): The error from the send operation.
 
     Returns:
-        bool: True if the connection must be re-established.
+        bool: True if the script must open a new connection.
     """
     if getattr(exc, "smtp_code", None) == 421:
         return True
@@ -1075,22 +1174,22 @@ def send_emails(
     port: Port = DEFAULT_SMTP_PORT,
     on_sent: Callable[[Sequence[str]], None] | None = None,
 ) -> int:
-    """
-    Send a sequence of emails through the configured SMTP server.
+    """Send the emails through the SMTP server.
 
-    Establishes a secure SSL connection to the SMTP server,
-    authenticates with the given credentials, and sends each message.
+    The function opens a secure connection, logs in, and sends each email.
 
-    Only temporary server rejections (codes 421, 450, 451 and 452) are
-    retried, with backoff and a fresh connection when the old one is
-    unusable: those codes mean the message was not accepted, so a retry
-    cannot deliver it twice. Transport failures (timeouts, resets, dropped
-    connections) are not retried, because the message may already have been
-    delivered by the time the failure surfaces. Failed messages are skipped,
-    the run continues, and every failure is logged at the end. Only
-    recipients the server accepted are passed to `on_sent`.
+    The function tries again only after a temporary rejection (codes 421,
+    450, 451, and 452). It waits between the attempts and opens a new
+    connection if necessary. Those codes mean that the server did not accept
+    the email, so a new attempt cannot deliver it twice.
 
-    Recipient addresses are already set in each EmailMessage object.
+    The function does not try again after a transport error (a timeout, a
+    reset, or a closed connection). The email can arrive before the error
+    appears. The function skips the email, continues with the next one, and
+    logs all the failures at the end. It sends only the accepted recipients
+    to `on_sent`.
+
+    Each EmailMessage object already contains the recipient addresses.
 
     Args:
         sender (Sender): Sender email address.
@@ -1098,16 +1197,16 @@ def send_emails(
         emails (Sequence[EmailMessage]): EmailMessage objects to send.
         host (Host): SMTP server hostname.
         port (Port): SMTP SSL port number.
-        on_sent (Callable[[Sequence[str]], None] | None): Callback invoked
-            with each sent email's accepted recipient addresses right after
-            a successful send, e.g. to record them in a sent log.
+        on_sent (Callable[[Sequence[str]], None] | None): A function that
+            receives the accepted addresses after each send, for example to
+            write them to the sent log.
 
     Returns:
-        int: The number of messages sent successfully.
+        int: The number of messages that the server accepted.
 
     Raises:
-        smtplib.SMTPAuthenticationError: If authentication fails.
-        OSError: If the SMTP connection cannot be established.
+        smtplib.SMTPAuthenticationError: The server rejected the credentials.
+        OSError: The SMTP connection cannot be established.
     """
     smtp = _open_smtp_connection(sender, password, host=host, port=port)
     sent_messages = 0
@@ -1117,9 +1216,10 @@ def send_emails(
         for i, email in enumerate(emails, start=1):
             for attempt in range(1, ATTEMPT_LIMIT + 1):
                 try:
-                    # sendmail returns {refused_addr: (code, error)} for
-                    # recipients the server rejected while delivering to
-                    # the rest; it raises if every recipient is refused.
+                    # send_message returns {refused_addr: (code, error)} for
+                    # the recipients that the server rejects. The other
+                    # recipients still get the message. The call raises an
+                    # error if the server rejects every recipient.
                     refused = smtp.send_message(email)
                 except (smtplib.SMTPException, OSError) as exc:
                     recipients = recipients_of(email, exclude=sender)
@@ -1134,16 +1234,16 @@ def send_emails(
                             ATTEMPT_LIMIT,
                             exc,
                         )
-                        sleep(2**attempt + uniform(0, 1))  # noqa: S311
+                        sleep(2**attempt + uniform(0, 1))
                         if _requires_reconnect(exc):
-                            # The connection is gone or closing; retry fresh.
+                            # The connection is closed. Open a new one.
                             smtp = _reconnect(
                                 smtp, sender, password, host, port
                             )
                         continue
-                    # A permanent rejection, or a transport failure whose
-                    # delivery state is unknown: retrying could deliver the
-                    # message twice, so record the failure and move on.
+                    # The server rejects the message for good, or a transport
+                    # error occurred. A new attempt can deliver the message
+                    # twice, so the code records the failure and continues.
                     failures.append(
                         (
                             recipients,
@@ -1158,7 +1258,7 @@ def send_emails(
                 else:
                     sent_messages += 1
 
-                    # Log only the recipients the server accepted.
+                    # Keep only the recipients that the server accepted.
                     sent_recipients = recipients_of(email, exclude=sender)
                     if refused:
                         refused_set = {
@@ -1172,17 +1272,17 @@ def send_emails(
                         for address, reason in refused.items():
                             failures.append(([address], str(reason)))
 
-                    # Record this email's recipients right away, so a crash
-                    # later in the run does not resend to them next time.
+                    # Write the recipients now. If the run stops later, the
+                    # next run does not email them again.
                     if sent_recipients and on_sent is not None:
                         on_sent(sent_recipients)
 
                     break
 
             if i < len(emails):
-                wait_time = uniform(*WAIT_TIMES)  # noqa: S311
+                wait_time = uniform(*WAIT_TIMES)
                 logger.debug(
-                    "Waiting for %.2f seconds before sending next email",
+                    "Wait %.2f seconds before the next email",
                     wait_time,
                 )
                 sleep(wait_time)
@@ -1191,7 +1291,7 @@ def send_emails(
 
     if failures:
         logger.error(
-            "%d of %d email(s) failed to send", len(failures), len(emails)
+            "%d of %d emails failed to send", len(failures), len(emails)
         )
         for recipients, reason in failures:
             logger.error(
@@ -1201,14 +1301,30 @@ def send_emails(
     return sent_messages
 
 
+def _exit_with_error(exc: Exception) -> NoReturn:
+    """Log a fatal error and stop the script.
+
+    The function logs the message at error level. It logs the traceback at
+    debug level, so a simple configuration mistake stays easy to read.
+
+    Args:
+        exc (Exception): The error that stopped the run.
+    """
+    logger.debug("Traceback:", exc_info=exc)
+    if isinstance(exc, smtplib.SMTPResponseException):
+        logger.error("SMTP error %s: %s", exc.smtp_code, exc.smtp_error)
+    else:
+        logger.error("%s", exc)
+    sys.exit(1)
+
+
 if __name__ == "__main__":
     try:
         main()
-    except smtplib.SMTPResponseException as exc:
-        logger.error("SMTP error %s: %s", exc.smtp_code, exc.smtp_error)
-        logger.debug("Traceback:", exc_info=True)
-        sys.exit(1)
-    except (ValueError, OSError) as exc:
-        logger.error("%s", exc)
-        logger.debug("Traceback:", exc_info=True)
-        sys.exit(1)
+    except (
+        TypeError,
+        ValueError,
+        OSError,
+        smtplib.SMTPResponseException,
+    ) as exc:
+        _exit_with_error(exc)
