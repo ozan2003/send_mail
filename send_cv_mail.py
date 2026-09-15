@@ -20,6 +20,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     Final,
+    NamedTuple,
     NewType,
     NoReturn,
     NotRequired,
@@ -30,6 +31,10 @@ from typing import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
+
+# Project identity for the User-Agent header of the emails.
+PROJECT_NAME: Final = "send-mail"
+PROJECT_VERSION: Final = "0.1.0"
 
 # Default configuration directory in the user home directory.
 DEFAULT_CONFIG_DIR: Final = Path.home() / ".config" / "send_cv"
@@ -72,7 +77,9 @@ TEMPORARY_SMTP_CODES: Final = frozenset({421, 450, 451, 452})
 
 # Address format accepted for senders and recipients.
 EMAIL_PATTERN: Final = re.compile(
-    r"(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)"
+    r"(^[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*"
+    r"@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+"
+    r"[A-Za-z]{2,}$)"
 )
 
 # Templates for the starter files.
@@ -126,6 +133,10 @@ def ensure_config_scaffold(config_dir: Path) -> None:
     credentials_file = config_dir / CREDENTIALS_FILENAME
     if not credentials_file.exists():
         credentials_file.write_text(CREDENTIALS_TEMPLATE, encoding="utf-8")
+        # The file will hold the password, so only the owner may read it.
+        # On Windows, chmod changes only the read-only flag, and the user
+        # profile already limits access to the file.
+        credentials_file.chmod(0o600)
         logger.info("Created the credentials file at %s", credentials_file)
 
     config_file = config_dir / CONFIG_FILENAME
@@ -1060,8 +1071,7 @@ def create_emails(
         email["Reply-To"] = sender
         email["Date"] = localtime()
         email["Message-ID"] = make_msgid(domain=sender.split("@", 1)[1])
-        py_version = f"{sys.version_info.major}.{sys.version_info.minor}"
-        email["User-Agent"] = f"smtplib (Python {py_version})"
+        email["User-Agent"] = f"{PROJECT_NAME}/{PROJECT_VERSION}"
         # The body is plain text.
         email.set_content(config["message"], subtype="plain", charset="utf-8")
 
@@ -1074,9 +1084,16 @@ def create_emails(
     ):
         email = build_single_email_message(sender, receiver_pack, config)
 
-        # Write the headers to the debug log.
+        # Write the headers to the debug log. The Bcc header holds the
+        # recipient addresses, so they stay out of the log.
         logger.debug("Email %d headers:", i)
         for header, value in email.items():
+            if header.lower() == "bcc":
+                logger.debug(
+                    "\tBcc: %d recipients",
+                    len(recipients_of(email, exclude=sender)),
+                )
+                continue
             logger.debug("\t%s: %s", header, value)
 
         emails.append(email)
@@ -1219,6 +1236,205 @@ def _requires_reconnect(exc: Exception) -> bool:
     )
 
 
+class _SendOutcome(NamedTuple):
+    """What happened to one email.
+
+    Attributes:
+        connection (smtplib.SMTP_SSL): The connection for the next email. It
+            differs from the argument when the function opened a new one.
+        sent (bool): True if the server accepted the message.
+        refused (list[tuple[str, str]]): One (address, reason) entry per
+            recipient that the server refused while it accepted the message.
+        reason (str): Why the email was not sent. It is empty when the server
+            accepted the message.
+        unreachable (str | None): Why the SMTP server is unreachable, or
+            None. The run cannot continue after this value is set.
+    """
+
+    connection: smtplib.SMTP_SSL
+    sent: bool
+    refused: list[tuple[str, str]]
+    reason: str
+    unreachable: str | None
+
+
+def _swap_connection(
+    smtp: smtplib.SMTP_SSL,
+    sender: Sender,
+    password: Password,
+    host: Host,
+    port: Port,
+) -> tuple[smtplib.SMTP_SSL, str | None]:
+    """Open a new connection in place of a broken one.
+
+    Args:
+        smtp (smtplib.SMTP_SSL): The connection to replace.
+        sender (Sender): Sender email address.
+        password (Password): Password or app-specific password for the account.
+        host (Host): SMTP server hostname.
+        port (Port): SMTP SSL port number.
+
+    Returns:
+        tuple[smtplib.SMTP_SSL, str | None]: The new connection and None. If
+            the server is unreachable, the old connection and the reason.
+    """
+    try:
+        return _reconnect(smtp, sender, password, host, port), None
+    except (smtplib.SMTPException, OSError) as exc:
+        return smtp, f"SMTP server unreachable: {exc}"
+
+
+def _refused_recipients(
+    refused: dict[str, tuple[int, bytes]],
+) -> list[tuple[str, str]]:
+    """Return one (address, reason) entry for each refused recipient.
+
+    Args:
+        refused (dict[str, tuple[int, bytes]]): The mapping that
+            smtplib.SMTP.send_message returns for the recipients that the
+            server rejects.
+
+    Returns:
+        list[tuple[str, str]]: The address and the reason of each refusal.
+    """
+    return [
+        (address, f"code {code}: {message.decode(errors='replace')}")
+        for address, (code, message) in refused.items()
+    ]
+
+
+def _error_reason(exc: Exception) -> str:
+    """Return a readable reason for a failure to send.
+
+    The plain text of an SMTP error contains the code and the message of the
+    server only inside a tuple, for example (550, b'5.7.1 spam'). The
+    function writes them in the same shape as a refused recipient.
+
+    Args:
+        exc (Exception): The error from the send operation.
+
+    Returns:
+        str: The reason for the log line.
+    """
+    if isinstance(exc, smtplib.SMTPResponseException):
+        message = exc.smtp_error
+        text = (
+            message.decode(errors="replace")
+            if isinstance(message, bytes)
+            else str(message)
+        )
+        return f"code {exc.smtp_code}: {text}"
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        return "; ".join(
+            f"{address}: {reason}"
+            for address, reason in _refused_recipients(exc.recipients)
+        )
+    return str(exc)
+
+
+def _send_one_email(
+    smtp: smtplib.SMTP_SSL,
+    email: EmailMessage,
+    *,
+    sender: Sender,
+    password: Password,
+    host: Host,
+    port: Port,
+    label: str,
+) -> _SendOutcome:
+    """Send one email and try again after a temporary rejection.
+
+    The function tries again only after a temporary rejection (codes 421,
+    450, 451, and 452). It waits between the attempts and opens a new
+    connection if the server closed the channel. Those codes mean that the
+    server did not accept the email, so a new attempt cannot deliver it
+    twice.
+
+    The function does not try again after a transport error (a timeout, a
+    reset, or a closed connection). The email can arrive before the error
+    appears.
+
+    Args:
+        smtp (smtplib.SMTP_SSL): The connection to send through.
+        email (EmailMessage): The message to send.
+        sender (Sender): Sender email address.
+        password (Password): Password or app-specific password for the account.
+        host (Host): SMTP server hostname.
+        port (Port): SMTP SSL port number.
+        label (str): Position of the email in the run, for the log lines.
+
+    Returns:
+        _SendOutcome: What happened to the email.
+    """
+    for attempt in range(1, ATTEMPT_LIMIT + 1):
+        try:
+            # send_message returns {refused_addr: (code, error)} for the
+            # recipients that the server rejects. The other recipients still
+            # get the message. The call raises an error if the server
+            # rejects every recipient.
+            refused = smtp.send_message(email)
+        except (smtplib.SMTPException, OSError) as exc:
+            transient = _is_transient_error(exc)
+            if transient and attempt < ATTEMPT_LIMIT:
+                logger.warning(
+                    "Temporary SMTP error for email %s (attempt %d/%d): %s",
+                    label,
+                    attempt,
+                    ATTEMPT_LIMIT,
+                    exc,
+                )
+                sleep(2**attempt + uniform(0, 1))
+                if _requires_reconnect(exc):
+                    # The connection is closed. Open a new one. If the
+                    # server is unreachable, a new attempt is not possible.
+                    smtp, unreachable = _swap_connection(
+                        smtp, sender, password, host, port
+                    )
+                    if unreachable is not None:
+                        return _SendOutcome(
+                            smtp,
+                            sent=False,
+                            refused=[],
+                            reason=f"not sent: {unreachable}",
+                            unreachable=unreachable,
+                        )
+                continue
+
+            # The server rejects the message for good, or a transport error
+            # occurred. A new attempt can deliver the message twice, so the
+            # function records the failure and continues with the next email.
+            reason = (
+                f"failed after {ATTEMPT_LIMIT} attempts: {_error_reason(exc)}"
+                if transient
+                else _error_reason(exc)
+            )
+            unreachable = None
+            if _requires_reconnect(exc):
+                # If this fails, the next email records the error.
+                smtp, unreachable = _swap_connection(
+                    smtp, sender, password, host, port
+                )
+            return _SendOutcome(
+                smtp,
+                sent=False,
+                refused=[],
+                reason=reason,
+                unreachable=unreachable,
+            )
+        else:
+            return _SendOutcome(
+                smtp,
+                sent=True,
+                refused=_refused_recipients(refused),
+                reason="",
+                unreachable=None,
+            )
+
+    # The loop returns a result on the last attempt, so it never gets here.
+    msg = "The attempt loop returned no result"
+    raise AssertionError(msg)
+
+
 def send_emails(
     sender: Sender,
     password: Password,
@@ -1237,11 +1453,11 @@ def send_emails(
     connection if necessary. Those codes mean that the server did not accept
     the email, so a new attempt cannot deliver it twice.
 
-    The function does not try again after a transport error (a timeout, a
-    reset, or a closed connection). The email can arrive before the error
-    appears. The function skips the email, continues with the next one, and
-    logs all the failures at the end. It sends only the accepted recipients
-    to `on_sent`.
+    The function skips an email that it cannot send, continues with the next
+    one, and logs all the failures at the end. It sends only the accepted
+    recipients to `on_sent`. If the server becomes unreachable during the
+    run, the function records the remaining emails as failures and returns,
+    so no failure report is lost.
 
     Each EmailMessage object already contains the recipient addresses.
 
@@ -1264,76 +1480,59 @@ def send_emails(
     """
     smtp = _open_smtp_connection(sender, password, host=host, port=port)
     sent_messages = 0
-    failures: list[tuple[list[str], str]] = []
+    # One (recipients, reason) entry per email that was not sent.
+    failed_emails: list[tuple[list[str], str]] = []
+    # One (address, reason) entry per recipient that the server refused
+    # while the email itself was sent.
+    refused_recipients: list[tuple[str, str]] = []
+    # The reason why the SMTP server is unreachable, or None. When the
+    # server is unreachable, the remaining emails cannot be sent.
+    server_error: str | None = None
 
     try:
         for i, email in enumerate(emails, start=1):
-            for attempt in range(1, ATTEMPT_LIMIT + 1):
-                try:
-                    # send_message returns {refused_addr: (code, error)} for
-                    # the recipients that the server rejects. The other
-                    # recipients still get the message. The call raises an
-                    # error if the server rejects every recipient.
-                    refused = smtp.send_message(email)
-                except (smtplib.SMTPException, OSError) as exc:
-                    recipients = recipients_of(email, exclude=sender)
-                    transient = _is_transient_error(exc)
-                    if transient and attempt < ATTEMPT_LIMIT:
-                        logger.warning(
-                            "Temporary SMTP error for email %d/%d "
-                            "(attempt %d/%d): %s",
-                            i,
-                            len(emails),
-                            attempt,
-                            ATTEMPT_LIMIT,
-                            exc,
-                        )
-                        sleep(2**attempt + uniform(0, 1))
-                        if _requires_reconnect(exc):
-                            # The connection is closed. Open a new one.
-                            smtp = _reconnect(
-                                smtp, sender, password, host, port
-                            )
-                        continue
-                    # The server rejects the message for good, or a transport
-                    # error occurred. A new attempt can deliver the message
-                    # twice, so the code records the failure and continues.
-                    failures.append(
-                        (
-                            recipients,
-                            f"failed after {ATTEMPT_LIMIT} attempts: {exc}"
-                            if transient
-                            else str(exc),
-                        )
-                    )
-                    if _requires_reconnect(exc):
-                        smtp = _reconnect(smtp, sender, password, host, port)
-                    break
-                else:
-                    sent_messages += 1
+            recipients = recipients_of(email, exclude=sender)
 
-                    # Keep only the recipients that the server accepted.
-                    sent_recipients = recipients_of(email, exclude=sender)
-                    if refused:
-                        refused_set = {
-                            address.strip().lower() for address in refused
-                        }
-                        sent_recipients = [
-                            recipient
-                            for recipient in sent_recipients
-                            if recipient.strip().lower() not in refused_set
-                        ]
-                        for address, reason in refused.items():
-                            failures.append(([address], str(reason)))
+            if server_error is not None:
+                # The server is unreachable. This email was not attempted.
+                failed_emails.append(
+                    (recipients, f"not attempted: {server_error}")
+                )
+                continue
 
-                    # Write the recipients now. If the run stops later, the
-                    # next run does not email them again.
-                    if sent_recipients and on_sent is not None:
-                        on_sent(sent_recipients)
+            outcome = _send_one_email(
+                smtp,
+                email,
+                sender=sender,
+                password=password,
+                host=host,
+                port=port,
+                label=f"{i}/{len(emails)}",
+            )
+            smtp = outcome.connection
+            server_error = outcome.unreachable
 
-                    break
+            if not outcome.sent:
+                failed_emails.append((recipients, outcome.reason))
+            else:
+                sent_messages += 1
+                # Keep only the recipients that the server accepted.
+                refused_set = {
+                    address.strip().lower() for address, _ in outcome.refused
+                }
+                accepted = [
+                    recipient
+                    for recipient in recipients
+                    if recipient.strip().lower() not in refused_set
+                ]
+                refused_recipients.extend(outcome.refused)
 
-            if i < len(emails):
+                # Write the recipients now. If the run stops later, the next
+                # run does not email them again.
+                if accepted and on_sent is not None:
+                    on_sent(accepted)
+
+            if server_error is None and i < len(emails):
                 wait_time = uniform(*WAIT_TIMES)
                 logger.debug(
                     "Wait %.2f seconds before the next email",
@@ -1343,14 +1542,23 @@ def send_emails(
     finally:
         smtp.close()
 
-    if failures:
+    if failed_emails:
         logger.error(
-            "%d of %d emails failed to send", len(failures), len(emails)
+            "%d of %d emails failed to send",
+            len(failed_emails),
+            len(emails),
         )
-        for recipients, reason in failures:
+        for recipients, reason in failed_emails:
             logger.error(
                 "Failed to send to %s: %s", ", ".join(recipients), reason
             )
+
+    if refused_recipients:
+        logger.error(
+            "The server refused %d recipients:", len(refused_recipients)
+        )
+        for address, reason in refused_recipients:
+            logger.error("Refused %s: %s", address, reason)
 
     return sent_messages
 
