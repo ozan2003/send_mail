@@ -68,6 +68,7 @@ select = [
 ignore = [
     "E501",
     "ISC001",
+    "C901",
     "COM812",
     "ANN401",  # use Any in **kwargs
     "PLR0911", # many early returns in retry state machines

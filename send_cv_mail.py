@@ -126,7 +126,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Utilities: file input and the sent log
 # ---------------------------------------------------------------------------
-def load_file(file_path: Path) -> tuple[str, bytes]:
+def _load_file(file_path: Path) -> tuple[str, bytes]:
     """Read a file and return its name and its data.
 
     Args:
@@ -156,7 +156,7 @@ def load_file(file_path: Path) -> tuple[str, bytes]:
     return file_name, file_data
 
 
-def parse_toml(toml_path: Path) -> dict[str, Any]:
+def _parse_toml(toml_path: Path) -> dict[str, Any]:
     """Read a TOML file and return its data.
 
     Args:
@@ -231,7 +231,7 @@ def _read_email_file(path: Path) -> tuple[list[str], int]:
     return valid_emails, invalid_count
 
 
-def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
+def _load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
     """Read email addresses from one or more files.
 
     The function skips the addresses that are not correct. It logs the file
@@ -269,7 +269,7 @@ def load_emails_from_files(file_paths: Iterable[Path]) -> list[str]:
         return valid_emails
 
 
-def deduplicate_emails(receivers: Iterable[str]) -> tuple[list[str], int]:
+def _deduplicate_emails(receivers: Iterable[str]) -> tuple[list[str], int]:
     """Remove duplicate addresses and keep the first occurrence.
 
     The comparison ignores uppercase and lowercase letters.
@@ -299,7 +299,7 @@ def deduplicate_emails(receivers: Iterable[str]) -> tuple[list[str], int]:
     return unique, duplicate_count
 
 
-def load_sent_log(log_path: Path) -> set[str]:
+def _load_sent_log(log_path: Path) -> set[str]:
     """Read the sent log and return the addresses in it.
 
     The function returns an empty set if the log file does not exist.
@@ -355,7 +355,7 @@ def append_to_sent_log(log_path: Path, recipients: Iterable[str]) -> None:
         )
 
 
-def filter_unsent(
+def _filter_unsent(
     receivers: Iterable[str],
     sent_recipients: set[str],
 ) -> tuple[list[str], int]:
@@ -463,7 +463,7 @@ def load_config(config_path: Path) -> EmailConfig:
         )
         raise FileNotFoundError(msg)
 
-    data = parse_toml(config_path)
+    data = _parse_toml(config_path)
 
     if "subject" not in data or not isinstance(data["subject"], str):
         msg = f"Missing or not correct 'subject' value in {config_path}"
@@ -512,7 +512,7 @@ def load_credentials(
         )
         raise FileNotFoundError(msg)
 
-    data = parse_toml(credentials_path)
+    data = _parse_toml(credentials_path)
 
     raw_smtp = data.get("smtp")
     if not isinstance(raw_smtp, dict):
@@ -628,7 +628,7 @@ def configure_logging(loglevel: str) -> None:
     logger.debug("The log level is %s", getLevelName(logger.level))
 
 
-def path_option_help(
+def _path_option_help(
     description: str, filename: str, default_path: Path
 ) -> str:
     """Return the help text of an option that accepts a file path.
@@ -714,7 +714,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--config",
         type=str,
-        help=path_option_help(
+        help=_path_option_help(
             "Path to the configuration file",
             CONFIG_FILENAME,
             DEFAULT_CONFIG_PATH,
@@ -723,7 +723,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--credentials",
         type=str,
-        help=path_option_help(
+        help=_path_option_help(
             "Path to the credentials file",
             CREDENTIALS_FILENAME,
             DEFAULT_CREDENTIALS_PATH,
@@ -800,7 +800,7 @@ def _receivers_from_args(args: argparse.Namespace) -> list[str]:
         emails_file_paths: Iterable[Path] = (
             Path(path).expanduser() for path in args.emails_files
         )
-        receivers = load_emails_from_files(emails_file_paths)
+        receivers = _load_emails_from_files(emails_file_paths)
         if len(receivers) == 0:
             msg = f"No email addresses in the files '{args.emails_files}'"
             raise ValueError(msg)
@@ -831,13 +831,15 @@ def pending_receivers(
     Raises:
         ValueError: No recipient is given, or an address is not correct.
     """
-    receivers, duplicate_count = deduplicate_emails(_receivers_from_args(args))
+    receivers, duplicate_count = _deduplicate_emails(
+        _receivers_from_args(args)
+    )
     if duplicate_count > 0:
         logger.warning("Removed %d duplicate addresses", duplicate_count)
 
-    sent_recipients = load_sent_log(sent_log_path)
+    sent_recipients = _load_sent_log(sent_log_path)
     if sent_recipients:
-        receivers, skipped_count = filter_unsent(receivers, sent_recipients)
+        receivers, skipped_count = _filter_unsent(receivers, sent_recipients)
         if skipped_count > 0:
             logger.info(
                 "Skipped %d recipients. They are in the sent log %s",
@@ -851,7 +853,7 @@ def pending_receivers(
 # ---------------------------------------------------------------------------
 # Mail composition
 # ---------------------------------------------------------------------------
-def recipients_of(
+def _recipients_of(
     email: EmailMessage,
     *,
     exclude: str | None = None,
@@ -961,7 +963,7 @@ def create_emails(
             if header.lower() == "bcc":
                 logger.debug(
                     "\tBcc: %d recipients",
-                    len(recipients_of(email, exclude=sender)),
+                    len(_recipients_of(email, exclude=sender)),
                 )
                 continue
             logger.debug("\t%s: %s", header, value)
@@ -992,7 +994,7 @@ def attach_cv(
         FileNotFoundError: The CV file does not exist.
     """
     cv_path = resolve_cv_path(explicit_cv, config)
-    cv_name, cv_data = load_file(cv_path)
+    cv_name, cv_data = _load_file(cv_path)
 
     mime_type, _ = mimetypes.guess_type(cv_path)
     content_type = mime_type or "application/octet-stream"
@@ -1039,7 +1041,7 @@ def print_dry_run(
         print(
             f"[DRY RUN] Email {i}: To={email['To']} | "
             f"Bcc={bcc or '-'} | Subject={email['Subject']} | "
-            f"Recipients={len(recipients_of(email, exclude=sender))}"
+            f"Recipients={len(_recipients_of(email, exclude=sender))}"
         )
 
 
@@ -1102,30 +1104,6 @@ def _open_smtp_connection(
     raise OSError(msg)
 
 
-def _reconnect(
-    smtp: smtplib.SMTP_SSL,
-    sender: Sender,
-    password: Password,
-    host: Host,
-    port: Port,
-) -> smtplib.SMTP_SSL:
-    """Close a connection and return a new connection.
-
-    Args:
-        smtp (smtplib.SMTP_SSL): The connection to replace. It can be broken,
-            and then closing it does nothing.
-        sender (Sender): Sender email address.
-        password (Password): Password or app-specific password for the account.
-        host (Host): SMTP server hostname.
-        port (Port): SMTP SSL port number.
-
-    Returns:
-        smtplib.SMTP_SSL: A new SMTP connection that is ready to use.
-    """
-    smtp.close()
-    return _open_smtp_connection(sender, password, host=host, port=port)
-
-
 def _is_transient_error(exc: Exception) -> bool:
     """Return True if the server deferred the email.
 
@@ -1161,7 +1139,9 @@ def _requires_reconnect(exc: Exception) -> bool:
 
     Code 421 means that the server closes the channel, so the script must
     open a new connection. The same is true after SMTPServerDisconnected and
-    after a transport error, for example a timeout or a reset.
+    after a transport error, for example a timeout or a reset. It is also
+    true when the server answers 421 to a recipient, because smtplib then
+    reports SMTPRecipientsRefused, which carries no smtp_code.
 
     Codes 450, 451, and 452, and permanent rejections, keep the connection
     usable.
@@ -1172,6 +1152,8 @@ def _requires_reconnect(exc: Exception) -> bool:
     Returns:
         bool: True if the script must open a new connection.
     """
+    if isinstance(exc, smtplib.SMTPRecipientsRefused):
+        return any(code == 421 for code, _ in exc.recipients.values())
     if getattr(exc, "smtp_code", None) == 421:
         return True
     if isinstance(exc, smtplib.SMTPServerDisconnected):
@@ -1212,6 +1194,8 @@ def _swap_connection(
 ) -> tuple[smtplib.SMTP_SSL, str | None]:
     """Open a new connection in place of a broken one.
 
+    The function closes the broken connection first.
+
     Args:
         smtp (smtplib.SMTP_SSL): The connection to replace.
         sender (Sender): Sender email address.
@@ -1224,9 +1208,13 @@ def _swap_connection(
             the server is unreachable, the old connection and the reason.
     """
     try:
-        return _reconnect(smtp, sender, password, host, port), None
+        smtp.close()
+        new_smtp = _open_smtp_connection(
+            sender, password, host=host, port=port
+        )
     except (smtplib.SMTPException, OSError) as exc:
         return smtp, f"SMTP server unreachable: {exc}"
+    return new_smtp, None
 
 
 def _refused_recipients(
@@ -1317,7 +1305,11 @@ def _send_one_email(
             # recipients that the server rejects. The other recipients still
             # get the message. The call raises an error if the server
             # rejects every recipient.
-            refused = smtp.send_message(email)
+            # to_addrs holds the real recipients, because the To header holds
+            # the sender for a batch, and smtplib would send it a copy.
+            refused = smtp.send_message(
+                email, to_addrs=_recipients_of(email, exclude=sender)
+            )
         except (smtplib.SMTPException, OSError) as exc:
             transient = _is_transient_error(exc)
             if transient and attempt < ATTEMPT_LIMIT:
@@ -1436,7 +1428,7 @@ def send_emails(
 
     try:
         for i, email in enumerate(emails, start=1):
-            recipients = recipients_of(email, exclude=sender)
+            recipients = _recipients_of(email, exclude=sender)
 
             if server_error is not None:
                 # The server is unreachable. This email was not attempted.
