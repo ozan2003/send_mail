@@ -3,7 +3,7 @@ name = "send-mail"
 version = "0.1.0"
 description = "Script to send CV emails"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.15"
 dependencies = []
 
 [tool.ruff]
@@ -100,7 +100,7 @@ include = ["send_cv_mail.py"]
 typeCheckingMode = "strict"
 
 # Environment
-pythonVersion = "3.14"
+pythonVersion = "3.15"
 deprecateTypingAliases = true
 
 # Rules that default to "none" in strict mode
